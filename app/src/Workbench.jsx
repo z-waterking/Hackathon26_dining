@@ -10,6 +10,7 @@ import {
   X,
   LoaderCircle,
   RefreshCw,
+  ListChecks,
 } from "lucide-react";
 import Feedback from "./Feedback";
 import Catalog from "./Catalog";
@@ -18,8 +19,10 @@ import { request } from "./api";
 import "./workbench.css";
 
 const Analytics = lazy(() => import("./Analytics"));
+const Actions = lazy(() => import("./Actions"));
 const navigation = [
   { id: "feedback", name: "反馈中心", icon: MessageSquare },
+  { id: "actions", name: "Action 事项", icon: ListChecks },
   { id: "menus", name: "六周菜单", icon: CalendarDays },
   { id: "catalog", name: "菜品资料", icon: BookOpen },
   { id: "analytics", name: "消费分析", icon: ChartNoAxesCombined },
@@ -76,6 +79,7 @@ export default function Workbench() {
     menus: Menus,
     catalog: Catalog,
     analytics: Analytics,
+    actions: Actions,
   };
   const selectView = (id) => {
     setView(id);
@@ -166,7 +170,7 @@ export default function Workbench() {
                   <Suspense
                     fallback={<div className="loading">正在加载工作视图</div>}
                   >
-                    <View data={data} run={run} busy={busy} />
+                    <View data={data} run={run} busy={busy} onNavigate={selectView} />
                   </Suspense>
                 </div>
               );

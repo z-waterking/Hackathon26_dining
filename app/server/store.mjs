@@ -9,7 +9,10 @@ export function createStore(filename, seed) {
   database.exec(
     "PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;",
   );
-  const tables = ["feedback", "dishes", "plans", "transactions", "meta"];
+  const tables = [
+    "feedback", "dishes", "plans", "transactions", "meta",
+    "actions", "settings", "menuRuns", "imports", "aiUsage", "audit",
+  ];
   for (const table of tables)
     database.exec(
       `CREATE TABLE IF NOT EXISTS ${table} (id TEXT PRIMARY KEY, data TEXT NOT NULL)`,

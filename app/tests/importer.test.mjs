@@ -7,9 +7,9 @@ test("all material sheets are read and typed records exclude templates", () => {
   const data = readMaterials(
     resolve(import.meta.dirname, "../../materials/inspection"),
   );
-  assert.equal(data.report.workbooks, 16);
-  assert.equal(data.report.sheets, 69);
-  assert.equal(data.report.rows, 22365);
+  assert.equal(data.report.workbooks, 17);
+  assert.equal(data.report.sheets, 72);
+  assert.equal(data.report.rows, 22564);
   assert.equal(data.report.formulaErrors, 56);
   assert.ok(data.dishes.length > 1800);
   assert.ok(data.recipes.length > 500);
@@ -21,6 +21,10 @@ test("all material sheets are read and typed records exclude templates", () => {
       item.sources.some((source) => source.sheet === "2026.9反馈"),
     ),
   );
+  assert.equal(data.feedback.length, 146);
+  assert.ok(data.feedback.every((item) => item.sources.every((source) => source.file === "新餐厅反馈记录表-from 202607 2.xlsx")));
+  assert.equal(data.report.quarantinedFormRows, 0, "raw questionnaire is imported only through the converter");
+  assert.ok(data.feedback.every((item) => item.targetRow && typeof item.reply === "string"));
   assert.ok(
     data.feedback.some(
       (item) => item.type === "投诉" && item.content.length > 10,

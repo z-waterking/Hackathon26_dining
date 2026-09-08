@@ -1,5 +1,6 @@
 param(
-    [string]$Root = (Split-Path -Parent $PSScriptRoot)
+    [string]$Root = (Split-Path -Parent $PSScriptRoot),
+    [switch]$DetailedReport
 )
 
 $ErrorActionPreference = 'Stop'
@@ -23,7 +24,9 @@ $output = Join-Path $Root 'materials/inspection'
 $null = New-Item -ItemType Directory -Path $output -Force
 $files = @(
     Get-ChildItem -LiteralPath $Root -Filter '*.xlsx' -File
-    Get-ChildItem -LiteralPath (Join-Path $Root 'materials/extracted') -Filter '*.xlsx' -File -Recurse
+    if (Test-Path -LiteralPath (Join-Path $Root 'materials/extracted')) {
+        Get-ChildItem -LiteralPath (Join-Path $Root 'materials/extracted') -Filter '*.xlsx' -File -Recurse
+    }
 ) | Where-Object { -not $_.Name.StartsWith('~$') } | Sort-Object FullName
 $inventory = [Collections.Generic.List[object]]::new()
 $bookNumber = 0
@@ -92,5 +95,7 @@ foreach ($file in $files) {
     finally { $archive.Dispose() }
 }
 $inventory | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $output 'inventory.json') -Encoding utf8
-$inventory | Select-Object Id, Sheet, NonemptyRows, NonemptyCells, FormulaCount, Merges, @{ Name = 'Errors'; Expression = { $_.Errors.Count } } | Format-Table -AutoSize | Out-String -Width 200
+if ($DetailedReport) {
+    $inventory | Select-Object Id, Sheet, NonemptyRows, NonemptyCells, FormulaCount, Merges, @{ Name = 'Errors'; Expression = { $_.Errors.Count } } | Format-Table -AutoSize | Out-String -Width 200
+}
 "Workbooks: $bookNumber; Sheets: $($inventory.Count); Rows: $(($inventory | Measure-Object NonemptyRows -Sum).Sum); Cells: $(($inventory | Measure-Object NonemptyCells -Sum).Sum)"

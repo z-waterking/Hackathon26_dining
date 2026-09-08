@@ -8,11 +8,18 @@ foreach ($name in @('六周菜单.zip', '新六周菜单.zip')) {
     $path = Join-Path $Root $name
     $destination = Join-Path $Root ('materials/extracted/' + [IO.Path]::GetFileNameWithoutExtension($name))
     if (-not (Test-Path -LiteralPath $path)) { throw "Missing source archive: $name" }
-    if (-not (Test-Path -LiteralPath $destination)) {
-        Expand-Archive -LiteralPath $path -DestinationPath $destination
-    }
     $archive = [IO.Compression.ZipFile]::OpenRead($path)
     try {
+        # Validate archive paths before extracting any file.
+        $prefix = [IO.Path]::GetFullPath($destination) + [IO.Path]::DirectorySeparatorChar
+        foreach ($entry in $archive.Entries) {
+            if (-not $entry.Name) { continue }
+            $target = [IO.Path]::GetFullPath((Join-Path $destination $entry.FullName))
+            if (-not $target.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { throw 'Archive path outside destination' }
+        }
+        if (-not (Test-Path -LiteralPath $destination)) {
+            Expand-Archive -LiteralPath $path -DestinationPath $destination
+        }
         foreach ($entry in $archive.Entries) {
             if (-not $entry.Name) { continue }
             $target = [IO.Path]::GetFullPath((Join-Path $destination $entry.FullName))

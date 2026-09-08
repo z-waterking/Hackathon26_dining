@@ -1,13 +1,10 @@
-import { useDeferredValue, useState } from "react";
+import { useDeferredValue, useRef, useState } from "react";
 import {
   Plus,
   Search,
-  MessageSquare,
-  Clock3,
-  CheckCircle2,
-  AlertCircle,
   FileText,
   ArrowUpRight,
+  FileInput,
 } from "lucide-react";
 import {
   Badge,
@@ -15,13 +12,18 @@ import {
   ExportButton,
   Field,
   ImportButton,
-  Metric,
   Modal,
   Pagination,
 } from "./shared";
-import { downloadCsv, request } from "./api";
+import { downloadCsv, request, uploadFeedback } from "./api";
+import { ConversionReport, FeedbackResponse, MonthlyInsights } from "./FeedbackWorkflow";
+import ConvertedFeedbackTable from "./ConvertedFeedbackTable";
+import FeedbackOverview from "./FeedbackOverview";
+import FeedbackInbox from "./FeedbackInbox";
+import FeedbackActionsPanel from "./FeedbackActionsPanel";
+import "./feedback-dashboard.css";
 
-export default function Feedback({ data, run, busy }) {
+export default function Feedback({ data, run, busy, onNavigate }) {
   const [month, setMonth] = useState("2026-08");
   const [query, setQuery] = useState("");
   const search = useDeferredValue(query);
@@ -32,11 +34,23 @@ export default function Feedback({ data, run, busy }) {
   const [create, setCreate] = useState(false);
   const [summary, setSummary] = useState(false);
   const [showSummaries, setShowSummaries] = useState(false);
+  const [conversion, setConversion] = useState(null);
+  const [batchChoice, setBatchChoice] = useState(null);
+  const [view, setView] = useState("overview");
+  const [demo, setDemo] = useState(false);
+  const [workspaceSelected, setWorkspaceSelected] = useState(null);
+  const uploadReference = useRef(null);
+  const ledgerReference = useRef(null);
+  const aggregateReference = useRef(null);
+  const latestUpload = (data.imports || []).find((batch) => batch.uploaded);
+  const displayedBatch = batchChoice === "hidden" ? null : batchChoice || latestUpload;
+  const currentFeedback = selected && (data.feedback.find((item) => item.id === selected.id) || selected);
   const monthly = data.feedback.filter(
-    (item) => !month || item.date.startsWith(month),
+    (item) => !item.demo && !item.quarantined && (!month || item.date.startsWith(month)),
   );
   const individual = monthly.filter((item) => !item.summaryRecord);
-  const items = monthly
+  const listRecords = data.feedback.filter((item) => !item.quarantined && !!item.demo === demo && (!month || item.date.startsWith(month)));
+  const items = listRecords
     .filter(
       (item) =>
         item.summaryRecord === showSummaries &&
@@ -71,8 +85,17 @@ export default function Feedback({ data, run, busy }) {
       疑似重复: item.duplicatePossible ? "待核验" : "",
       跟进: item.events.map((event) => event.text).join("\n"),
     }));
+  const openWorkspace = (item) => { setWorkspaceSelected(item.id); setDemo(!!item.demo); setView("inbox"); };
+  const showLedger = () => { setView("overview"); ledgerReference.current?.scrollIntoView({ behavior: "smooth", block: "start" }); };
+  const showAggregate = () => { aggregateReference.current?.scrollIntoView({ behavior: "smooth", block: "start" }); };
+  const loadDemo = () => run(async () => {
+    const result = await request("/demo/actions", {});
+    setDemo(true); setMonth(""); setQuery(""); setStatus(""); setType(""); setShowSummaries(false); setPage(1);
+    setWorkspaceSelected(result.feedbackIds?.[0] || null);
+    return `示例已就绪：${result.feedbackIds?.length || 12} 条反馈归纳为 ${result.actionIds?.length || 4} 项待审改善事项`;
+  });
   return (
-    <>
+    <div className="feedback-dashboard">
       <div className="page-heading">
         <div>
           <span className="eyebrow">SERVICE / 01</span>
@@ -90,41 +113,31 @@ export default function Feedback({ data, run, busy }) {
           </button>
         </div>
       </div>
-      <div className="metrics">
-        <Metric
-          label="本月反馈记录"
-          value={individual.length}
-          detail={`${month || "全部月份"} · 含待核验重复项`}
-          icon={MessageSquare}
-          color="blue"
-        />
-        <Metric
-          label="未处理"
-          value={individual.filter((item) => item.status === "未处理").length}
-          detail="等待首次跟进"
-          icon={AlertCircle}
-          color="red"
-        />
-        <Metric
-          label="跟进中"
-          value={individual.filter((item) => item.status === "跟进中").length}
-          detail="历史跟进状态待核验"
-          icon={Clock3}
-          color="gold"
-        />
-        <Metric
-          label="已完成"
-          value={individual.filter((item) => item.status === "已完成").length}
-          detail="按当前状态统计"
-          icon={CheckCircle2}
-        />
-      </div>
-      <section className="work-section">
+      <div className="fd-view-tabs"><div role="tablist" aria-label="反馈视图"><button role="tab" aria-selected={view === "overview"} className={view === "overview" ? "active" : ""} onClick={() => setView("overview")}>反馈总览</button><button role="tab" aria-selected={view === "inbox"} className={view === "inbox" ? "active" : ""} onClick={() => setView("inbox")}>处理工作区</button><button onClick={showLedger}>反馈台账</button></div><label className="fd-demo-filter"><input type="checkbox" aria-label="示例反馈" checked={demo} onChange={(event) => { setDemo(event.target.checked); setMonth(""); setWorkspaceSelected(null); setPage(1); }} />示例反馈{demo && <Badge tone="gold">演示范围</Badge>}</label></div>
+      {view === "overview" ? <FeedbackOverview records={individual} month={month} onSelect={openWorkspace} onStatus={(value) => { setStatus(value); setDemo(false); setPage(1); showLedger(); }} onCreate={() => setCreate(true)} onUpload={() => uploadReference.current?.click()} onSummary={() => setSummary(true)} onAggregate={showAggregate} onDemo={loadDemo} /> : <FeedbackInbox data={data} demo={demo} selectedId={workspaceSelected} onSelect={setWorkspaceSelected} month={month} run={run} busy={busy} onNavigate={onNavigate} />}
+      <div ref={aggregateReference}><FeedbackActionsPanel data={data} demo={demo} run={run} busy={busy} onLoadDemo={loadDemo} onNavigate={onNavigate} /></div>
+      <section className="work-section fd-ledger" ref={ledgerReference}>
         <div className="section-heading">
           <h2>
-            反馈台账 <span>{items.length}</span>
+            反馈台账 <span>{items.length}</span>{demo && <Badge tone="gold">示例反馈</Badge>}
           </h2>
           <div className="actions">
+            <label className={`button file-button ${busy ? "disabled" : ""}`}>
+              <FileInput size={16} />
+              上传旧表 Excel
+              <input ref={uploadReference} type="file" accept=".xlsx" aria-label="上传旧表 Excel" disabled={busy} onChange={(event) => {
+                const file = event.target.files[0];
+                event.target.value = "";
+                if (!file) return;
+                run(async () => {
+                  const result = await uploadFeedback(file);
+                  setConversion(result);
+                  setBatchChoice(result);
+                  setMonth(""); setQuery(""); setType(""); setStatus(""); setShowSummaries(false); setPage(1); setDemo(false);
+                  return `上传转换完成，新增 ${result.inserted} 条，重复 ${result.skipped} 条`;
+                });
+              }} />
+            </label>
             <ImportButton
               disabled={busy}
               onFile={(file) =>
@@ -141,6 +154,16 @@ export default function Feedback({ data, run, busy }) {
             />
           </div>
         </div>
+        <p className="upload-guidance">上传 Forms 导出的原始旧表（.xlsx，最大 10 MB），系统自动转换为新表的 10 列并入库。无需上传模板；重复记录不新增、不覆盖人工处理。</p>
+        {conversion && (
+          <div className="notice import-result" role="status">
+            <strong>已按新餐厅反馈记录表格式转换</strong>
+            <span>{conversion.source} · 新增 {conversion.inserted} 条 · 匹配 {conversion.merged || 0} 条 · 重复 {conversion.skipped} 条</span>
+            <details><summary>转换报告与下载</summary><ConversionReport batch={conversion} /></details>
+          </div>
+        )}
+        {!!data.imports?.length && <details className="import-history"><summary>最近转换批次 · {data.imports.length}</summary>{data.imports.slice(0, 5).map((batch) => <details key={batch.id}><summary>{batch.source} · {new Date(batch.at).toLocaleString("zh-CN")} · 新增 {batch.inserted} 条 / 重复 {batch.skipped} 条</summary><button onClick={() => setBatchChoice(batch)}>查看新表</button><ConversionReport batch={batch} /></details>)}</details>}
+        {displayedBatch && <><div className="converted-controls"><button className="text-button" onClick={() => setBatchChoice("hidden")}>收起新表</button></div><ConvertedFeedbackTable key={displayedBatch.id} batch={displayedBatch} feedback={data.feedback} onFollowUp={setSelected} busy={busy} /></>}
         <div className="filters">
           <label className="search">
             <Search size={17} />
@@ -228,6 +251,7 @@ export default function Feedback({ data, run, busy }) {
                     <td className="restaurant-cell">{item.restaurant}</td>
                     <td className="content-cell">
                       <div className="clamp">{item.content}</div>
+                      {item.demo && <Badge tone="gold">示例</Badge>}
                       {item.duplicatePossible && (
                         <small className="warning-text">
                           疑似跨表重复 · 待核验
@@ -343,19 +367,28 @@ export default function Feedback({ data, run, busy }) {
         </Modal>
       )}
       {selected && (
-        <Modal title="反馈跟进" onClose={() => setSelected(null)}>
+        <Modal title="反馈跟进" onClose={() => setSelected(null)} wide>
           <div className="detail-meta">
-            <Badge>{selected.type}</Badge>
-            <Badge>{selected.status}</Badge>
+            <Badge>{currentFeedback.type}</Badge>
+            <Badge>{currentFeedback.status}</Badge>
             <span>
               {selected.restaurant} · {selected.date}
             </span>
           </div>
           <p className="feedback-full">{selected.content}</p>
+          <FeedbackResponse
+            key={selected.id}
+            feedback={currentFeedback}
+            actions={(data.actions || []).filter((action) => action.feedbackIds?.includes(selected.id))}
+            aiStatus={data.aiStatus}
+            run={run}
+            busy={busy}
+            onNavigate={onNavigate}
+          />
           <h3>处理记录</h3>
-          {!selected.events.length && <p className="muted">暂无处理记录</p>}
+          {!currentFeedback.events.length && <p className="muted">暂无处理记录</p>}
           <div className="timeline">
-            {selected.events.map((event, index) => (
+            {currentFeedback.events.map((event, index) => (
               <div key={index}>
                 <small>
                   {event.at
@@ -415,6 +448,7 @@ export default function Feedback({ data, run, busy }) {
         <Modal
           title={`${month || "全部月份"} 反馈汇总`}
           onClose={() => setSummary(false)}
+          wide
         >
           <div className="summary-stats">
             <strong>{individual.length}</strong>
@@ -428,6 +462,7 @@ export default function Feedback({ data, run, busy }) {
             {individual.filter((item) => item.duplicatePossible).length}{" "}
             条疑似重复待核验
           </p>
+          <MonthlyInsights month={month} feedback={data.feedback} aiStatus={data.aiStatus} run={run} busy={busy} />
           <h3>问题分类</h3>
           {categories.map(([category, count]) => (
             <div className="bar-row" key={category}>
@@ -462,6 +497,6 @@ export default function Feedback({ data, run, busy }) {
           </footer>
         </Modal>
       )}
-    </>
+    </div>
   );
 }

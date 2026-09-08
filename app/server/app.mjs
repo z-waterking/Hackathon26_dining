@@ -2,8 +2,8 @@ import Fastify from "fastify";
 import staticFiles from "@fastify/static";
 import { z } from "zod";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, createReadStream } from "node:fs";
+import { resolve, basename, relative, isAbsolute } from "node:path";
 import {
   feedbackSchema,
   feedbackUpdateSchema,
@@ -15,13 +15,32 @@ import {
   dateSchema,
 } from "./domain.mjs";
 import { generateMenu, validateMenu, checkMenu } from "./menus.mjs";
+import { createAiClient } from "./ai.mjs";
+import { getSettings } from "./settings.mjs";
+import { analyzeFeedback, saveReply, updateAction, monthlySummary, summarizeMonth } from "./feedback-ai.mjs";
+import { convertAndImport, uploadAndImport, convertedBatchRows, MAX_FEEDBACK_UPLOAD_BYTES } from "./bootstrap.mjs";
+import { runMenuWorkflow, attachMenuWorkflow, reinspectMenuWorkflow, runDemoMenuWorkflow } from "./menu-workflow.mjs";
+import { ensureDemoActions } from "./demo-actions.mjs";
+import { getActionSummary, summarizeActions } from "./action-summary.mjs";
+import { publicData, publicMenuRun } from "./public-data.mjs";
 
 const hash = (value) => createHash("sha256").update(value).digest("hex");
 export function createApp(
   store,
   dist = resolve(import.meta.dirname, "../dist"),
+  options = {},
 ) {
   const app = Fastify({ bodyLimit: 5 * 1024 * 1024, logger: false });
+  app.addContentTypeParser("application/octet-stream", { parseAs: "buffer", bodyLimit: MAX_FEEDBACK_UPLOAD_BYTES }, (_request, body, done) => done(null, body));
+  const ai = options.ai || createAiClient(store);
+  getSettings(store);
+  app.addHook("preSerialization", async (_request, _reply, payload) => publicData(payload));
+  const activeTasks = new Set();
+  async function exclusive(key, action) {
+    if (activeTasks.has(key)) throw new Error("此任务正在进行，请等待当前请求完成");
+    activeTasks.add(key);
+    try { return await action(); } finally { activeTasks.delete(key); }
+  }
   app.addHook("onRequest", async (request, response) => {
     response.header("X-Content-Type-Options", "nosniff");
     response.header("X-Frame-Options", "DENY");
@@ -33,7 +52,10 @@ export function createApp(
       const origin = request.headers.origin;
       if (origin && !/^http:\/\/(127\.0\.0\.1|localhost):\d+$/.test(origin))
         return response.status(403).send({ error: "来源不允许" });
-      if (!request.headers["content-type"]?.startsWith("application/json"))
+      const uploading = request.method === "POST" && request.url.split("?")[0] === "/api/feedback/upload";
+      if (uploading && !request.headers["content-type"]?.startsWith("application/octet-stream"))
+        return response.status(415).send({ error: "上传Excel需使用application/octet-stream" });
+      if (!uploading && !request.headers["content-type"]?.startsWith("application/json"))
         return response.status(415).send({ error: "需要JSON请求" });
     }
     if (request.url.startsWith("/api"))
@@ -56,11 +78,66 @@ export function createApp(
       report: store.get("meta", "report"),
       rules: store.get("meta", "rules"),
       initialized: store.get("meta", "initialized"),
+      actions: store.all("actions"),
+      aiStatus: ai.status(),
+      imports: store.all("imports").slice(-20).reverse(),
     }),
   );
   app.get("/api/materials", (_request, response) =>
     response.send(store.get("meta", "inventory")),
   );
+  // Internal model instructions are maintained by the application, not the
+  // operational UI. Retire the old prompt editor endpoints entirely.
+  app.get("/api/settings", (_request, response) => response.status(404).send({ error: "此入口已停用，请在Action模块管理改善事项" }));
+  app.put("/api/settings", (_request, response) => response.status(404).send({ error: "此入口已停用，请在Action模块管理改善事项" }));
+  app.get("/api/ai/status", (_request, response) => response.send(ai.status()));
+  app.get("/api/audit", (_request, response) => response.send(store.all("audit").slice(-100).reverse()));
+  app.get("/api/menu-runs/:id", (request, response) => response.send(publicMenuRun(required("menuRuns", request.params.id))));
+  app.get("/api/actions/summary", (request, response) => {
+    const scope = z.object({ month: z.string().default(""), demo: z.enum(["true", "false"]).default("false") }).parse(request.query);
+    return response.send(getActionSummary(store, { month: scope.month, demo: scope.demo === "true" }));
+  });
+  app.post("/api/actions/summarize", async (request, response) => {
+    const scope = z.object({ month: z.string().default(""), demo: z.boolean().default(false), force: z.boolean().default(false) }).strict().parse(request.body || {});
+    return response.send(await exclusive("action-summary", () => summarizeActions(store, ai, scope)));
+  });
+  app.post("/api/demo/actions", (_request, response) => response.send(ensureDemoActions(store)));
+  app.get("/api/imports/:id/rows", (request, response) => response.send(convertedBatchRows(store, request.params.id, options.root)));
+  app.get("/api/imports/:id/download", (request, response) => {
+    const batch = required("imports", request.params.id);
+    const format = z.enum(["xlsx", "csv"]).default("xlsx").parse(request.query.format);
+    const path = format === "xlsx" ? batch.xlsxPath : batch.csvPath;
+    const root = resolve(options.root || resolve(import.meta.dirname, "../.."), "app/data/conversions");
+    const within = path ? relative(root, resolve(path)) : "..";
+    if (!path || within.startsWith("..") || isAbsolute(within) || !existsSync(path))
+      throw new Error("此批次未生成可下载文件，请重新转换");
+    response.header("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(basename(path))}`);
+    response.type(format === "xlsx" ? "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" : "text/csv; charset=utf-8");
+    return response.send(createReadStream(path));
+  });
+  app.post("/api/feedback/convert", async (request, response) => {
+    const input = z.object({ import: z.boolean().default(true) }).strict().parse(request.body || {});
+    const result = await exclusive("conversion", () => convertAndImport(store, { root: options.root, importRows: input.import, conversionImpl: options.conversionImpl }));
+    return response.send(result);
+  });
+  app.post("/api/feedback/upload", { bodyLimit: MAX_FEEDBACK_UPLOAD_BYTES }, async (request, response) => {
+    let filename;
+    try { filename = decodeURIComponent(request.headers["x-file-name"] || ""); }
+    catch { throw new Error("上传文件名编码无效，请重新选择文件"); }
+    const result = await exclusive("conversion", () => uploadAndImport(store, { bytes: request.body, filename, root: options.root, conversionImpl: options.conversionImpl }));
+    return response.status(201).send(result);
+  });
+  app.get("/api/feedback/summary", (request, response) => response.send(monthlySummary(store, request.query.month)));
+  app.post("/api/feedback/summary", async (request, response) => {
+    const { month } = z.object({ month: z.string() }).strict().parse(request.body);
+    return response.send(await exclusive(`summary-${month}`, () => summarizeMonth(store, ai, month)));
+  });
+  app.post("/api/feedback/:id/analyze", async (request, response) => {
+    const input = z.object({ force: z.boolean().default(false) }).strict().parse(request.body || {});
+    return response.send(await exclusive(`feedback-${request.params.id}`, () => analyzeFeedback(store, ai, request.params.id, input)));
+  });
+  app.post("/api/feedback/:id/reply", (request, response) => response.send(saveReply(store, request.params.id, request.body)));
+  app.patch("/api/actions/:id", (request, response) => response.send(updateAction(store, request.params.id, request.body)));
   app.get("/api/recipes/:id", (request, response) => {
     const dish = required("dishes", request.params.id);
     response.send(
@@ -162,9 +239,15 @@ export function createApp(
     store.put("dishes", item.id, item);
     response.send(item);
   });
-  app.post("/api/plans/generate", (request, response) => {
+  app.post("/api/plans/generate", async (request, response) => {
+    if (request.body.demo === true)
+      return response.send(await exclusive("menu-workflow", () => runDemoMenuWorkflow({ store, input: request.body, settings: getSettings(store) })));
+    if (request.body.useAi === true) {
+      const result = await exclusive("menu-workflow", () => runMenuWorkflow({ store, ai, input: request.body, settings: getSettings(store) }));
+      return response.send(result);
+    }
     const dishes = store.all("dishes");
-    const plan = generateMenu(dishes, request.body, store.all("feedback"));
+    const plan = generateMenu(dishes, request.body);
     const previous = store
       .all("plans")
       .filter((item) => item.stall === plan.stall)
@@ -183,8 +266,16 @@ export function createApp(
           item.stall === (input.scope === "all" ? "全部档口" : input.stall),
       )
       .at(-1);
-    return checkMenu(dishes, input, previous);
+    const checked = checkMenu(dishes, input, previous);
+    return attachMenuWorkflow(store, checked, input.workflow, getSettings(store));
   }
+  app.post("/api/plans/inspect", async (request, response) => {
+    const prior = store.get("menuRuns", request.body.workflow?.runId || "");
+    if (prior && (request.body.demo === true) !== (prior.demo === true))
+      throw new Error("模拟和正式菜单的检验模式不可混用；模拟检验需显式 demo: true");
+    const checked = checkedPlan(request.body);
+    return response.send(await exclusive("menu-workflow", () => reinspectMenuWorkflow({ store, ai, input: checked, settings: getSettings(store) })));
+  });
   app.post("/api/plans/check", (request, response) =>
     response.send(checkedPlan(request.body)),
   );
@@ -199,10 +290,10 @@ export function createApp(
   });
   app.get("/api/plans/:id", (request, response) => {
     const item = required("plans", request.params.id);
-    response.send({
+    response.send(attachMenuWorkflow(store, {
       ...item,
       validation: validateMenu(item, store.all("dishes")),
-    });
+    }, item.workflow, getSettings(store)));
   });
   app.post("/api/pos/import", (request, response) => {
     const { csv } = z.object({ csv: z.string().min(1) }).parse(request.body);
@@ -280,7 +371,7 @@ export function createApp(
             .join("；")
         : error.message;
     response
-      .status(error.statusCode === 413 ? 413 : 400)
+      .status([413, 502, 503].includes(error.statusCode) ? error.statusCode : 400)
       .send({ error: message || "请求失败" });
   });
   return app;

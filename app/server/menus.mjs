@@ -7,7 +7,7 @@ import {
   slotPrices,
 } from "./domain.mjs";
 
-const batchOptionsSchema = planOptionsSchema
+export const batchOptionsSchema = planOptionsSchema
   .omit({ stall: true })
   .extend({ scope: z.literal("all") });
 const entrySchema = z.object({
@@ -24,13 +24,13 @@ export function menuStalls(plan) {
   return plan.scope === "all" ? plan.stalls : [plan.stall];
 }
 
-export function generateMenu(dishes, input, feedback = []) {
-  if (input.scope !== "all") return generatePlan(dishes, input, feedback);
+export function generateMenu(dishes, input, feedback = [], selectionPolicy = []) {
+  if (input.scope !== "all") return generatePlan(dishes, input, feedback, selectionPolicy);
   const options = batchOptionsSchema.parse(input);
   const stalls = [...new Set(dishes.map((dish) => dish.stall))];
   if (!stalls.length) throw new Error("菜库中没有档口");
   const entries = stalls.flatMap((stall) =>
-    generatePlan(dishes, { ...options, stall }, feedback).entries.map(
+    generatePlan(dishes, { ...options, stall }, feedback, selectionPolicy).entries.map(
       (entry) => ({ ...entry, stall }),
     ),
   );

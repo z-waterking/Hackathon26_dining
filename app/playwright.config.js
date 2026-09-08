@@ -5,6 +5,9 @@ export default defineConfig({
   fullyParallel: false,
   workers: 1,
   timeout: 60000,
+  // Keep the isolated API in the runner process: Playwright webServer uses
+  // a shell child and unsupported graceful shutdown on Windows.
+  globalSetup: "./tests/browser-server.mjs",
   use: {
     baseURL: "http://127.0.0.1:4499",
     channel: process.env.PLAYWRIGHT_CHANNEL || "msedge",
@@ -24,10 +27,4 @@ export default defineConfig({
       use: { ...devices["iPhone 13"], defaultBrowserType: "chromium" },
     },
   ],
-  webServer: {
-    command: "node tests/browser-server.mjs",
-    url: "http://127.0.0.1:4499/api/health",
-    reuseExistingServer: false,
-    timeout: 60000,
-  },
 });

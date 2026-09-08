@@ -200,11 +200,10 @@ export function readMaterials(directory = resolve("../materials/inspection")) {
             addDish(stall, cells[name], cells[price], sheet, row.Row);
     }
   }
-  for (const [sheetId, stall] of [
-    ["book-12-sheet-001", "西岸小馆"],
-    ["book-16-sheet-001", "全球美食汇"],
-  ]) {
-    const sheet = sheets.find((item) => item.Id === sheetId);
+  // Inspection book numbers depend on directory ordering and are not stable IDs.
+  for (const stall of ["西岸小馆", "全球美食汇"]) {
+    const sheet = sheets.find((item) => item.Source.includes(stall) && item.Sheet.trim() === "第二轮六周菜单");
+    if (!sheet) throw new Error(`Missing second-cycle menu for ${stall}`);
     let category = "";
     for (const row of sheet.Rows) {
       const cells = columns(row);
@@ -219,7 +218,8 @@ export function readMaterials(directory = resolve("../materials/inspection")) {
         addDish(stall, cells[name], cells[price], sheet, row.Row, category);
     }
   }
-  const riceSheet = sheets.find((sheet) => sheet.Id === "book-05-sheet-001");
+  const riceSheet = sheets.find((sheet) => sheet.Source.includes("米悦+阿彩妹") && sheet.Sheet === "Sheet1 (2)");
+  if (!riceSheet) throw new Error("Missing 米悦+阿彩妹 menu sheet");
   let riceStall = "";
   for (const row of riceSheet.Rows.filter((row) => row.Row > 1)) {
     const cells = columns(row);
@@ -227,7 +227,8 @@ export function readMaterials(directory = resolve("../materials/inspection")) {
     if (cells.B && cells.C) translations.set(key(cells.B), cells.C);
     addDish(riceStall, cells.B, cells.D, riceSheet, row.Row);
   }
-  const fixedSheet = sheets.find((sheet) => sheet.Id === "book-01-sheet-002");
+  const fixedSheet = sheets.find((sheet) => sheet.Source.includes("去重T1-3F六周早餐菜单") && sheet.Sheet.trim() === "六周菜单");
+  if (!fixedSheet) throw new Error("Missing fixed breakfast menu sheet");
   for (const row of fixedSheet.Rows.filter((row) =>
     [14, 15].includes(row.Row),
   )) {
@@ -237,10 +238,16 @@ export function readMaterials(directory = resolve("../materials/inspection")) {
   const feedback = [];
   let blankRows = 0;
   let correctedCategories = 0;
+  let merged = 0;
+  // Read one canonical history workbook. Copies such as “2” and “3” are the
+  // same historical log, not two distinct sets of feedback. Prefer requested 2.
+  const feedbackFiles = [...new Set(sheets.filter((sheet) => sheet.Source.startsWith("新餐厅反馈")).map((sheet) => sheet.Source))];
+  const historyFile = feedbackFiles.find((file) => file.endsWith(" 2.xlsx")) || feedbackFiles[0];
   for (const sheet of sheets.filter((sheet) =>
-    sheet.Source.startsWith("新餐厅反馈"),
+    sheet.Source === historyFile,
   )) {
-    const month = `2026-${sheet.Sheet.match(/\.(\d+)/)[1].padStart(2, "0")}`;
+    const period = sheet.Sheet.match(/(\d{4})\.(\d+)/);
+    const month = period ? `${period[1]}-${period[2].padStart(2, "0")}` : "";
     for (const row of sheet.Rows.filter((row) => row.Row > 1)) {
       const cells = columns(row);
       if (!valid(cells.E)) {
@@ -257,69 +264,45 @@ export function readMaterials(directory = resolve("../materials/inspection")) {
         correctedCategories++;
       }
       const followup = valid(cells.F) ? cells.F : "";
+      const reply = valid(cells.I) ? cells.I : "";
+      const originalId = valid(cells.B) ? cells.B : "";
+      const prior = originalId && feedback.find((item) => item.channel === cells.A && item.originalId === originalId && item.content === cells.E);
+      if (prior) {
+        prior.sources.push(provenance(sheet, row.Row));
+        merged++;
+        continue;
+      }
       feedback.push({
-        id: `F-${hash(`${sheet.Id}:${row.Row}`)}`,
-        originalId: valid(cells.B) ? cells.B : "",
+        id: `F-${hash(`${sheet.Source}:${sheet.Sheet}:${row.Row}`)}`,
+        originalId,
         channel: cells.A || "其他",
         restaurant: cells.C || "待确认",
         date: parseDate(cells.D, month),
         type,
         category,
         content: cells.E,
-        status: followup ? "跟进中" : "未处理",
+        status: followup || reply ? "跟进中" : "未处理",
         owner: "",
+        reply,
+        notes: valid(cells.J) ? cells.J : "",
+        targetRow: {
+          反馈来源: cells.A || "其他", 序号: originalId, 餐厅: cells.C || "待确认",
+          日期: parseDate(cells.D, month), 反馈内容: cells.E, 反馈跟进: followup,
+          反馈类别: type, 问题分类: category, 回复记录: reply, 备注: valid(cells.J) ? cells.J : "",
+        },
         summaryRecord: cells.A === "微信群",
         threadId: "",
         duplicatePossible: false,
         sources: [provenance(sheet, row.Row)],
-        events: followup ? [{ at: "", text: followup, kind: "历史跟进" }] : [],
+        events: [
+          ...(followup ? [{ at: "", text: followup, kind: "历史跟进" }] : []),
+          ...(reply ? [{ at: "", text: reply, kind: "历史回复" }] : []),
+        ],
       });
     }
   }
-  let merged = 0;
-  const forms = sheets.find((sheet) => sheet.Source.startsWith("微软BJW"));
-  for (const row of forms.Rows.filter((row) => row.Row > 1)) {
-    const cells = columns(row);
-    if (Number(cells.A) <= 10) continue;
-    const type =
-      ["表扬", "建议", "投诉", "询问"].find((item) =>
-        cells.H?.startsWith(item),
-      ) || "待分类";
-    const content = {
-      表扬: cells.K,
-      建议: cells.N,
-      投诉: cells.S,
-      询问: cells.U,
-    }[type];
-    if (!valid(content)) continue;
-    const prior = feedback.find(
-      (item) => item.channel === "二维码" && item.originalId === cells.A,
-    );
-    if (prior && key(prior.content) === key(content)) {
-      prior.sources.push(provenance(forms, row.Row));
-      merged++;
-      continue;
-    }
-    if (prior) prior.duplicatePossible = true;
-    feedback.push({
-      id: `F-form-${cells.A}`,
-      originalId: cells.A,
-      channel: "二维码",
-      restaurant:
-        { 表扬: cells.I, 建议: cells.L, 投诉: cells.O }[type] || "待确认",
-      date: parseDate(cells.C),
-      type,
-      category: "待分类",
-      content,
-      status: "未处理",
-      owner: "",
-      summaryRecord: false,
-      duplicatePossible: Boolean(prior),
-      threadId: "",
-      sources: [provenance(forms, row.Row)],
-      events: [],
-    });
-  }
+  // New questionnaire feedback enters only through convertFeedback and its
+  // target-column mapping. The old direct Forms seed is intentionally removed.
   return {
     dishes: [...dishes.values()],
     feedback,
@@ -346,7 +329,9 @@ export function readMaterials(directory = resolve("../materials/inspection")) {
       blankRows,
       correctedCategories,
       merged,
-      quarantinedFormRows: 10,
+      quarantinedFormRows: 0,
+      feedbackSource: "转换接口 + 目标格式历史记录",
+      historyFile,
       files: readdirSync(directory).length,
     },
   };

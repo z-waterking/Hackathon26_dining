@@ -12,6 +12,8 @@ import {
 import { Badge, Empty, ExportButton, Field, Metric, Modal } from "./shared";
 import { downloadCsv, request } from "./api";
 import { menuRows } from "./menu-export";
+import { AiAvailability } from "./FeedbackWorkflow";
+import MenuWorkflow from "./MenuWorkflow";
 
 export default function Menus({ data, run, busy }) {
   const [start, setStart] = useState("2026-09-07");
@@ -30,6 +32,8 @@ export default function Menus({ data, run, busy }) {
   const [issues, setIssues] = useState(false);
   const [history, setHistory] = useState(false);
   const [rules, setRules] = useState(false);
+  const [useAi, setUseAi] = useState(false);
+  const [demo, setDemo] = useState(false);
   const allStalls = [...new Set(data.dishes.map((dish) => dish.stall))];
   const planStalls = plan
     ? plan.scope === "all"
@@ -73,9 +77,11 @@ export default function Menus({ data, run, busy }) {
       seed,
       count,
       meals,
+      demo,
+      useAi: !demo && useAi && !!data.aiStatus?.configured,
     });
     showPlan(next);
-    return `已一次生成 ${next.stalls.length} 个档口的完整六周菜单`;
+    return `${demo ? "模拟测试：" : ""}已一次生成 ${next.stalls.length} 个档口的完整六周菜单`;
   }
   function exportPlan() {
     downloadCsv(
@@ -174,8 +180,18 @@ export default function Menus({ data, run, busy }) {
           一次生成全部档口六周菜单
         </button>
       </section>
+      <div className="ai-planner-controls">
+        <label className="check">
+          <input type="checkbox" checked={!demo && useAi && !!data.aiStatus?.configured} disabled={busy || demo || !data.aiStatus?.configured} onChange={(event) => setUseAi(event.target.checked)} />
+          启用 AI 排菜员与检验员
+        </label>
+        <label className="check"><input type="checkbox" checked={demo} disabled={busy} onChange={(event) => setDemo(event.target.checked)} />模拟排菜测试（不调用 AI）</label>
+        <p className="muted small">{demo ? "仅使用已批准的示例事项测试真实规则排菜和影响记录；角色结果由本地模拟器提供。" : "按原始排菜规则与已批准 Action 生成六周菜单，再由检验员检查执行情况。"}{(data.actions || []).filter((action) => action.feedbackIds?.length && Boolean(action.demo) === demo && action.status === "approved" && action.enabled && action.menuInstruction).length} 项已批准排菜要求可用。</p>
+        <AiAvailability status={data.aiStatus} />
+      </div>
       {plan ? (
         <>
+          <MenuWorkflow plan={plan} setPlan={setPlan} aiStatus={data.aiStatus} run={run} busy={busy} />
           <div className="metrics planner-metrics">
             <Metric
               label="排菜周期"

@@ -16,6 +16,20 @@ export async function request(path, body, method = "POST") {
   return data;
 }
 
+export async function uploadFeedback(file) {
+  if (!/\.xlsx$/i.test(file.name)) throw new Error("请选择 Excel .xlsx 文件");
+  if (!file.size) throw new Error("不能上传空文件");
+  if (file.size > 10 * 1024 * 1024) throw new Error("Excel 文件不能超过 10 MB");
+  const response = await fetch("/api/feedback/upload", {
+    method: "POST",
+    headers: { "Content-Type": "application/octet-stream", "X-File-Name": encodeURIComponent(file.name) },
+    body: file,
+  });
+  const result = await response.json();
+  if (!response.ok) throw new Error(result.error || "上传失败");
+  return result;
+}
+
 export function downloadCsv(name, rows) {
   const blob = new Blob(
     ["\uFEFF" + Papa.unparse(rows, { escapeFormulae: true })],

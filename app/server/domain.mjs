@@ -80,7 +80,7 @@ function fitsPrice(dish, slot) {
   return dish.price === slot;
 }
 
-export function generatePlan(allDishes, rawOptions, feedback = []) {
+export function generatePlan(allDishes, rawOptions, _feedback = [], selectionPolicy = []) {
   const options = planOptionsSchema.parse(rawOptions);
   const pool = allDishes.filter(
     (dish) =>
@@ -96,18 +96,9 @@ export function generatePlan(allDishes, rawOptions, feedback = []) {
     return randomState / 4294967296;
   };
   const usage = new Map();
-  const complaintNames = new Set(
-    pool
-      .filter((dish) =>
-        feedback.some(
-          (item) =>
-            item.type === "投诉" &&
-            item.status !== "已完成" &&
-            item.content.includes(dish.name),
-        ),
-      )
-      .map(canonical),
-  );
+  // Only the workflow's validated decisions affect selection. Raw feedback is
+  // deliberately ignored: a complaint is not an approved operating instruction.
+  const policyByDish = new Map(selectionPolicy.map((item) => [item.dishId, item]));
   for (let week = 0; week < 6; week++)
     for (let day = 0; day < 5; day++) {
       const date = new Date(`${options.start}T00:00:00Z`);
@@ -119,6 +110,7 @@ export function generatePlan(allDishes, rawOptions, feedback = []) {
           const candidates = pool
             .filter((dish) => {
               if (
+                policyByDish.get(dish.id)?.kind === "exclude" ||
                 !fitsPrice(dish, priceRule) ||
                 picked.some((item) => canonical(item) === canonical(dish))
               )
@@ -139,10 +131,11 @@ export function generatePlan(allDishes, rawOptions, feedback = []) {
               return true;
             })
             .map((dish) => {
+              const policy = policyByDish.get(dish.id);
+              const preference = policy?.kind === "prefer" ? -1 : policy?.kind === "avoid" ? 1 : 0;
               let score =
                 (usage.get(canonical(dish)) || 0) * 5 +
-                random() +
-                (complaintNames.has(canonical(dish)) ? 100 : 0);
+                random() + preference * Math.min(3, Math.max(1, policy?.weight || 1)) * 40;
               if (
                 ["饺好运", "南粉北面"].includes(options.stall) &&
                 slot === 0 &&
