@@ -1,0 +1,18 @@
+app/node_modules/
+app/dist/
+app/data/
+app/test-results/
+app/playwright-report/
+materials/extracted/
+materials/inspection/
+materials/analysis/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.xlsx
+*.zip
+/image.png
+/image copy.png
+.env
+.env.*
+!.env.example
