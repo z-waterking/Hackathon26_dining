@@ -9,6 +9,7 @@ import {
 } from "lucide-react";
 export function Modal({ title, onClose, children, wide = false }) {
   const reference = useRef(null);
+  const titleId = useId();
   useEffect(() => {
     const dialog = reference.current;
     dialog.showModal();
@@ -18,10 +19,11 @@ export function Modal({ title, onClose, children, wide = false }) {
     <dialog
       ref={reference}
       className={wide ? "modal wide" : "modal"}
-      onCancel={onClose}
+      aria-labelledby={titleId}
+      onCancel={(event) => { event.preventDefault(); onClose(); }}
     >
       <header>
-        <h2>{title}</h2>
+        <h2 id={titleId}>{title}</h2>
         <button
           className="icon-button"
           title="关闭"

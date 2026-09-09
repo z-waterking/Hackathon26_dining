@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
 import { Check, FileCheck2, Save, Sparkles, X } from "lucide-react";
 import { Badge, Empty, Field } from "./shared";
-import { request } from "./api";
+import { diningApi } from "./api/dining";
 import { readable } from "./ui-text";
+import FeedbackWordCloud from "./FeedbackWordCloud";
 
 const actionLabels = { pending: "待审批", approved: "已批准", rejected: "已拒绝" };
 const dateText = (value) => value ? new Date(value).toLocaleString("zh-CN") : "时间待核验";
@@ -13,8 +14,8 @@ export function ConversionReport({ batch }) {
     <div className="conversion-report">
       <p className="small">来源 {report.sourceRows ?? "—"} 行 · 已转换 {report.convertedRows ?? "—"} 行 · 与历史表匹配 {report.matchedHistoricalRows ?? 0} 行 · 隔离待核验 {report.quarantinedRows ?? 0} 行</p>
       <div className="actions">
-        {batch.xlsxPath && <a className="button" href={`/api/imports/${encodeURIComponent(batch.id)}/download?format=xlsx`} download>下载目标格式 XLSX</a>}
-        {batch.csvPath && <a className="button" href={`/api/imports/${encodeURIComponent(batch.id)}/download?format=csv`} download>下载转换 CSV</a>}
+        {batch.xlsxPath && <a className="button" href={diningApi.imports.downloadUrl(batch.id, "xlsx")} download>下载目标格式 XLSX</a>}
+        {batch.csvPath && <a className="button" href={diningApi.imports.downloadUrl(batch.id, "csv")} download>下载转换 CSV</a>}
       </div>
       {!!report.issues?.length && <details><summary>待核验与跳过明细 · {report.issues.length}</summary>{report.issues.map((issue, index) => <p className="source" key={index}>{issue.sheet} · 行 {issue.row} · {issue.reason}</p>)}</details>}
       {Object.keys(report.mapping || {}).length > 0 && <details><summary>字段转换映射</summary><pre className="trace-json">{JSON.stringify(report.mapping, null, 2)}</pre></details>}
@@ -45,7 +46,7 @@ function ActionEditor({ action, run, busy, showSource, feedback }) {
   });
   const update = (field, value) => setDraft((current) => ({ ...current, [field]: value }));
   const save = (status) => run(async () => {
-    const result = await request(`/actions/${action.id}`, { ...draft, ...(status ? { status } : {}) }, "PATCH");
+    const result = await diningApi.actions.update(action.id, { ...draft, ...(status ? { status } : {}) });
     return status ? `Action ${actionLabels[result.status] || actionLabels[status]}，已保留调整记录` : result.status === "pending" && action.status === "approved" ? "Action 调整已保存，内容变更需要重新审批" : "Action 调整已保存";
   });
   const history = action.history || action.revisions || action.adjustments || [];
@@ -87,13 +88,13 @@ export function FeedbackResponse({ feedback, actions = [], aiStatus, run, busy, 
   return (
     <section className="feedback-response">
       <div className="section-heading"><h3>反馈回复</h3><button disabled={busy || !aiStatus?.configured} onClick={() => run(async () => {
-        const result = await request(`/feedback/${feedback.id}/analyze`, {});
+        const result = await diningApi.feedback.draftReply(feedback.id);
         setReply(result.feedback?.aiAnalysis?.replyDraft || "");
         return "回复草稿已生成，可编辑后保存";
       })}><Sparkles size={15} />AI 起草回复</button></div>
       <AiAvailability status={aiStatus} />
       {feedback.aiAnalysis && <div className="ai-analysis"><strong>{feedback.aiAnalysis.demo ? "示例回复参考" : "反馈分析"}</strong><p>{readable(feedback.aiAnalysis.summary)}</p><div className="badge-group">{(feedback.aiAnalysis.keywords || []).map((word, index) => <Badge key={index}>{typeof word === "string" ? word : word.text}</Badge>)}</div></div>}
-      <form onSubmit={(event) => { event.preventDefault(); run(async () => { await request(`/feedback/${feedback.id}/reply`, { text: reply.trim() }); setReply(""); return "回复已保存到本地记录"; }); }}>
+      <form onSubmit={(event) => { event.preventDefault(); run(async () => { await diningApi.feedback.saveReply(feedback.id, reply.trim()); setReply(""); return "回复已保存到本地记录"; }); }}>
         <Field label="反馈回复"><textarea rows={4} maxLength={5000} required value={reply} onChange={(event) => setReply(event.target.value)} placeholder="编辑给反馈人的回复，保存到本地反馈台账" /></Field>
         <div className="reply-toolbar"><small className="muted">此处仅保存回复记录，不会发送邮件或消息。</small><div className="actions">{feedback.aiAnalysis?.replyDraft && <button type="button" onClick={() => setReply(feedback.aiAnalysis.replyDraft)}>{feedback.aiAnalysis.demo ? "使用示例回复草稿" : "使用 AI 回复草稿"}</button>}<button className="primary" disabled={busy || !reply.trim()}><Save size={15} />保存回复</button></div></div>
       </form>
@@ -114,18 +115,17 @@ export function MonthlyInsights({ month, feedback, aiStatus, run, busy }) {
   useEffect(() => {
     let ignore = false;
     if (!month) return;
-    request(`/feedback/summary?month=${encodeURIComponent(month)}`).then((next) => { if (!ignore) setResponse({ month, feedback, retry, result: next, error: "" }); }).catch((failure) => { if (!ignore) setResponse({ month, feedback, retry, result: null, error: failure.message }); });
+    diningApi.feedback.summary(month).then((next) => { if (!ignore) setResponse({ month, feedback, retry, result: next, error: "" }); }).catch((failure) => { if (!ignore) setResponse({ month, feedback, retry, result: null, error: failure.message }); });
     return () => { ignore = true; };
   }, [month, feedback, retry]);
   const keywords = result?.keywords || [];
-  const maximum = Math.max(1, ...keywords.map((word) => Number(word.count) || 0));
   if (!month) return <p className="notice">请选择一个月份以查看词云与 AI 月报。</p>;
   return (
     <section className="monthly-insights">
-      <div className="section-heading"><h3>本月在讨论什么</h3><button disabled={busy || loading || !aiStatus?.configured || !result?.total} onClick={() => run(async () => { const next = await request("/feedback/summary", { month }); setResponse({ month, feedback, retry, result: next, error: "" }); return "AI 月度汇总已生成"; })}><Sparkles size={15} />生成 AI 月报</button></div>
+      <div className="section-heading"><h3>本月在讨论什么</h3><button disabled={busy || loading || !aiStatus?.configured || !result?.total} onClick={() => run(async () => { const next = await diningApi.feedback.summarize(month); setResponse({ month, feedback, retry, result: next, error: "" }); return "AI 月度汇总已生成"; })}><Sparkles size={15} />生成 AI 月报</button></div>
       <AiAvailability status={aiStatus} />
       {loading ? <p className="muted">正在整理本月反馈…</p> : error ? <div className="notice" role="alert">{error} <button onClick={() => setRetry((value) => value + 1)}>重试词云</button></div> : !result?.total ? <Empty text="该月暂无反馈，暂无词云或月度摘要" /> : <>
-        {keywords.length ? <div className="feedback-wordcloud" role="img" aria-label={`${month} 反馈词云：${keywords.map((word) => `${word.text} ${word.count}次`).join("，")}`}>{keywords.slice(0, 40).map((word, index) => <span key={`${word.text}-${index}`} style={{ fontSize: `${14 + 27 * Math.sqrt(Number(word.count) / maximum)}px` }} title={`${word.text}：${word.count} 次`}>{word.text}<small>{word.count}</small></span>)}</div> : <p className="muted">当前反馈暂无可提取关键词。</p>}
+        <FeedbackWordCloud words={keywords} label={`${month} 反馈词云`} />
         <p className="insight-summary">{readable(result.summary)}</p>
         {result.aiSummary && <div className="ai-analysis"><strong>AI 月报</strong><p>{readable(result.aiSummary)}</p></div>}
       </>}

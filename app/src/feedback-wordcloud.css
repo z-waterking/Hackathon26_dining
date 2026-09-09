@@ -1,0 +1,41 @@
+.feedback-wordcloud-root {
+  --wordcloud-height: 260px;
+  width: 100%;
+  min-width: 0;
+  min-height: var(--wordcloud-height);
+}
+.feedback-wordcloud-viz {
+  width: 100%;
+  height: calc(var(--wordcloud-height) - 24px);
+  min-width: 0;
+  overflow: hidden;
+}
+.feedback-wordcloud-svg { display: block; width: 100%; height: 100%; overflow: hidden; }
+.feedback-wordcloud-svg text { cursor: default; transition: fill .15s ease; }
+.feedback-wordcloud-svg text:hover { fill: #084d47; }
+.feedback-wordcloud-caption {
+  margin: 5px 0 0;
+  text-align: center;
+  font-size: 11px;
+  line-height: 19px;
+  color: #83938e;
+}
+.feedback-wordcloud-state {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 20px;
+  text-align: center;
+  color: #708a83;
+  font-size: 13px;
+}
+.feedback-wordcloud-state small { color: #92a29c; font-size: 11px; }
+.feedback-wordcloud-state button { padding: 6px 13px; font-size: 12px; }
+.feedback-wordcloud-empty-mark { font-size: 32px; color: #bccec7; font-weight: 600; }
+.feedback-wordcloud-loading { color: #3a9888; letter-spacing: 7px; font-size: 26px; }
+@media (prefers-reduced-motion: reduce) {
+  .feedback-wordcloud-svg text { transition: none; }
+}

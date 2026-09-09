@@ -2,7 +2,7 @@ import { useState } from "react";
 import { ClipboardCheck, Fingerprint, Sparkles } from "lucide-react";
 import { Badge, Empty, Modal } from "./shared";
 import { readable } from "./ui-text";
-import { request } from "./api";
+import { diningApi } from "./api/dining";
 
 const impactLabels = { applied: "已应用", partial: "部分应用", not_applied: "未应用" };
 const workflowLabels = { needs_review: "待人工审核", blocked: "检验未通过", stale: "需重新检验" };
@@ -15,8 +15,8 @@ export default function MenuWorkflow({ plan, setPlan, aiStatus, run, busy }) {
   return (
     <section className="work-section workflow-section">
       <div className="section-heading"><h2><ClipboardCheck size={18} /> 排菜员与检验员 <Badge tone={workflow.status === "blocked" || workflow.stale ? "gold" : "blue"}>{workflowLabels[workflow.status] || workflow.status}</Badge></h2><div className="actions">
-        {workflow.runId && <button disabled={busy} onClick={() => run(async () => { setTrace(await request(`/menu-runs/${workflow.runId}`)); return "已读取本次排菜留痕"; })}><Fingerprint size={15} />查看运行留痕</button>}
-        <button disabled={busy || (!demo && !aiStatus?.configured)} onClick={() => run(async () => { setPlan(await request("/plans/inspect", { ...plan, demo })); return "检验员已完成重新检验，请查看报告"; })}><Sparkles size={15} />{demo ? "重新模拟检验" : "重新 AI 检验"}</button>
+        {workflow.runId && <button disabled={busy} onClick={() => run(async () => { setTrace(await diningApi.plans.run(workflow.runId)); return "已读取本次排菜留痕"; })}><Fingerprint size={15} />查看运行留痕</button>}
+        <button disabled={busy || (!demo && !aiStatus?.configured)} onClick={() => run(async () => { setPlan(await diningApi.plans.inspect({ ...plan, demo })); return "检验员已完成重新检验，请查看报告"; })}><Sparkles size={15} />{demo ? "重新模拟检验" : "重新 AI 检验"}</button>
       </div></div>
       <p className="muted small">运行 {workflow.runId} · {workflow.inspectedAt ? new Date(workflow.inspectedAt).toLocaleString("zh-CN") : "尚无检验时间"}</p>
       {demo && <p className="notice">模拟测试 · 使用示例改善事项，不调用 Azure AI，不代表真实员工反馈或正式审核。</p>}

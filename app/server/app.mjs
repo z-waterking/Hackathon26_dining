@@ -3,26 +3,25 @@ import staticFiles from "@fastify/static";
 import { z } from "zod";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, createReadStream } from "node:fs";
-import { resolve, basename, relative, isAbsolute } from "node:path";
+import { resolve } from "node:path";
 import {
   feedbackSchema,
   feedbackUpdateSchema,
   dishUpdateSchema,
   parseCsv,
   transactionSchema,
-  aggregateTransactions,
-  demoTransactions,
   dateSchema,
 } from "./domain.mjs";
 import { generateMenu, validateMenu, checkMenu } from "./menus.mjs";
 import { createAiClient } from "./ai.mjs";
 import { getSettings } from "./settings.mjs";
-import { analyzeFeedback, saveReply, updateAction, monthlySummary, summarizeMonth } from "./feedback-ai.mjs";
-import { convertAndImport, uploadAndImport, convertedBatchRows, MAX_FEEDBACK_UPLOAD_BYTES } from "./bootstrap.mjs";
+import { analyzeFeedback, saveReply, updateAction, summarizeMonth } from "./feedback-ai.mjs";
+import { convertAndImport, uploadAndImport, MAX_FEEDBACK_UPLOAD_BYTES } from "./bootstrap.mjs";
 import { runMenuWorkflow, attachMenuWorkflow, reinspectMenuWorkflow, runDemoMenuWorkflow } from "./menu-workflow.mjs";
 import { ensureDemoActions } from "./demo-actions.mjs";
-import { getActionSummary, summarizeActions } from "./action-summary.mjs";
-import { publicData, publicMenuRun } from "./public-data.mjs";
+import { summarizeActions } from "./action-summary.mjs";
+import { publicData } from "./public-data.mjs";
+import { createQueryService } from "./data/query-service.mjs";
 
 const hash = (value) => createHash("sha256").update(value).digest("hex");
 export function createApp(
@@ -34,6 +33,7 @@ export function createApp(
   app.addContentTypeParser("application/octet-stream", { parseAs: "buffer", bodyLimit: MAX_FEEDBACK_UPLOAD_BYTES }, (_request, body, done) => done(null, body));
   const ai = options.ai || createAiClient(store);
   getSettings(store);
+  const queries = createQueryService(store, { ai, root: options.root });
   app.addHook("preSerialization", async (_request, _reply, payload) => publicData(payload));
   const activeTasks = new Set();
   async function exclusive(key, action) {
@@ -67,53 +67,33 @@ export function createApp(
     return item;
   };
   app.get("/api/health", (_request, response) => response.send({ ok: true }));
-  app.get("/api/data", (_request, response) =>
-    response.send({
-      dishes: store.all("dishes"),
-      feedback: store.all("feedback"),
-      plans: store.all("plans").map(({ entries, ...plan }) => ({
-        ...plan,
-        countEntries: entries.length,
-      })),
-      report: store.get("meta", "report"),
-      rules: store.get("meta", "rules"),
-      initialized: store.get("meta", "initialized"),
-      actions: store.all("actions"),
-      aiStatus: ai.status(),
-      imports: store.all("imports").slice(-20).reverse(),
-    }),
-  );
-  app.get("/api/materials", (_request, response) =>
-    response.send(store.get("meta", "inventory")),
-  );
+  app.get("/api/data", (_request, response) => response.send(queries.workspace()));
+  for (const resource of ["feedback", "dishes", "actions", "plans", "imports"])
+    app.get(`/api/${resource}`, (_request, response) => response.send(queries[resource]()));
+  app.get("/api/materials", (_request, response) => response.send(queries.materials()));
   // Internal model instructions are maintained by the application, not the
   // operational UI. Retire the old prompt editor endpoints entirely.
   app.get("/api/settings", (_request, response) => response.status(404).send({ error: "此入口已停用，请在Action模块管理改善事项" }));
   app.put("/api/settings", (_request, response) => response.status(404).send({ error: "此入口已停用，请在Action模块管理改善事项" }));
-  app.get("/api/ai/status", (_request, response) => response.send(ai.status()));
-  app.get("/api/audit", (_request, response) => response.send(store.all("audit").slice(-100).reverse()));
-  app.get("/api/menu-runs/:id", (request, response) => response.send(publicMenuRun(required("menuRuns", request.params.id))));
+  app.get("/api/ai/status", (_request, response) => response.send(queries.aiStatus()));
+  app.get("/api/audit", (_request, response) => response.send(queries.audit()));
+  app.get("/api/menu-runs/:id", (request, response) => response.send(queries.menuRun(request.params.id)));
   app.get("/api/actions/summary", (request, response) => {
     const scope = z.object({ month: z.string().default(""), demo: z.enum(["true", "false"]).default("false") }).parse(request.query);
-    return response.send(getActionSummary(store, { month: scope.month, demo: scope.demo === "true" }));
+    return response.send(queries.actionSummary({ month: scope.month, demo: scope.demo === "true" }));
   });
   app.post("/api/actions/summarize", async (request, response) => {
     const scope = z.object({ month: z.string().default(""), demo: z.boolean().default(false), force: z.boolean().default(false) }).strict().parse(request.body || {});
     return response.send(await exclusive("action-summary", () => summarizeActions(store, ai, scope)));
   });
   app.post("/api/demo/actions", (_request, response) => response.send(ensureDemoActions(store)));
-  app.get("/api/imports/:id/rows", (request, response) => response.send(convertedBatchRows(store, request.params.id, options.root)));
+  app.get("/api/imports/:id/rows", (request, response) => response.send(queries.convertedRows(request.params.id)));
   app.get("/api/imports/:id/download", (request, response) => {
-    const batch = required("imports", request.params.id);
     const format = z.enum(["xlsx", "csv"]).default("xlsx").parse(request.query.format);
-    const path = format === "xlsx" ? batch.xlsxPath : batch.csvPath;
-    const root = resolve(options.root || resolve(import.meta.dirname, "../.."), "app/data/conversions");
-    const within = path ? relative(root, resolve(path)) : "..";
-    if (!path || within.startsWith("..") || isAbsolute(within) || !existsSync(path))
-      throw new Error("此批次未生成可下载文件，请重新转换");
-    response.header("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(basename(path))}`);
-    response.type(format === "xlsx" ? "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" : "text/csv; charset=utf-8");
-    return response.send(createReadStream(path));
+    const artifact = queries.importDownload(request.params.id, format);
+    response.header("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(artifact.filename)}`);
+    response.type(artifact.contentType);
+    return response.send(createReadStream(artifact.path));
   });
   app.post("/api/feedback/convert", async (request, response) => {
     const input = z.object({ import: z.boolean().default(true) }).strict().parse(request.body || {});
@@ -127,7 +107,8 @@ export function createApp(
     const result = await exclusive("conversion", () => uploadAndImport(store, { bytes: request.body, filename, root: options.root, conversionImpl: options.conversionImpl }));
     return response.status(201).send(result);
   });
-  app.get("/api/feedback/summary", (request, response) => response.send(monthlySummary(store, request.query.month)));
+  app.get("/api/feedback/insights", (request, response) => response.send(queries.insights(request.query)));
+  app.get("/api/feedback/summary", (request, response) => response.send(queries.monthlySummary(request.query.month)));
   app.post("/api/feedback/summary", async (request, response) => {
     const { month } = z.object({ month: z.string() }).strict().parse(request.body);
     return response.send(await exclusive(`summary-${month}`, () => summarizeMonth(store, ai, month)));
@@ -138,17 +119,7 @@ export function createApp(
   });
   app.post("/api/feedback/:id/reply", (request, response) => response.send(saveReply(store, request.params.id, request.body)));
   app.patch("/api/actions/:id", (request, response) => response.send(updateAction(store, request.params.id, request.body)));
-  app.get("/api/recipes/:id", (request, response) => {
-    const dish = required("dishes", request.params.id);
-    response.send(
-      store
-        .get("meta", "recipes")
-        .filter(
-          (recipe) =>
-            recipe.name.replace(/\s/g, "") === dish.name.replace(/\s/g, ""),
-        ),
-    );
-  });
+  app.get("/api/recipes/:id", (request, response) => response.send(queries.recipes(request.params.id)));
   app.post("/api/feedback", (request, response) => {
     const input = feedbackSchema.parse(request.body);
     const prior = input.threadId
@@ -288,13 +259,7 @@ export function createApp(
     store.put("plans", item.id, item);
     response.status(201).send(item);
   });
-  app.get("/api/plans/:id", (request, response) => {
-    const item = required("plans", request.params.id);
-    response.send(attachMenuWorkflow(store, {
-      ...item,
-      validation: validateMenu(item, store.all("dishes")),
-    }, item.workflow, getSettings(store)));
-  });
+  app.get("/api/plans/:id", (request, response) => response.send(queries.plan(request.params.id)));
   app.post("/api/pos/import", (request, response) => {
     const { csv } = z.object({ csv: z.string().min(1) }).parse(request.body);
     const dishes = store.all("dishes");
@@ -351,11 +316,7 @@ export function createApp(
       .parse(request.query);
     if (filter.start && filter.end && filter.start > filter.end)
       throw new Error("起始日期不能晚于结束日期");
-    const demo = filter.demo === "true";
-    const records = demo
-      ? demoTransactions(store.all("dishes"))
-      : store.all("transactions");
-    response.send({ ...aggregateTransactions(records, filter), demo });
+    response.send(queries.analytics(filter));
   });
   if (existsSync(dist)) app.register(staticFiles, { root: dist });
   app.setNotFoundHandler((request, response) => {

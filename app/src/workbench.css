@@ -1296,11 +1296,6 @@ details {
 .audit-details { border-top: 1px solid var(--border); padding-top: 14px; }
 .monthly-insights { padding: 14px 0 20px; margin-top: 10px; border-bottom: 1px solid var(--border); }
 .monthly-insights .section-heading { margin-bottom: 0; }
-.feedback-wordcloud { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; align-content: center; gap: 11px 21px; padding: 28px 18px; min-height: 210px; border-radius: 8px; background: linear-gradient(120deg, #f3f7f0, #f9f8ef); }
-.feedback-wordcloud > span { color: #2d6e4c; line-height: 1.4; font-weight: 600; overflow-wrap: anywhere; }
-.feedback-wordcloud > span:nth-child(3n + 2) { color: #9c844b; }
-.feedback-wordcloud > span:nth-child(3n) { color: #658aa0; }
-.feedback-wordcloud small { font-size: 10px; vertical-align: super; margin-left: 4px; opacity: .7; font-weight: 400; }
 .insight-summary { font-size: 12px; line-height: 2; }
 .operations-flow { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 22px 0 28px; font-size: 11px; }
 .ai-usage { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 20px 0; }
@@ -1331,7 +1326,6 @@ details {
 @media (max-width: 760px) {
   .ai-usage { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .prompt-grid, .role-results { grid-template-columns: 1fr; }
-  .feedback-wordcloud { padding: 20px 10px; gap: 10px 15px; }
   .action-footer { flex-wrap: wrap; }
   .action-card, .action-impacts > details { padding: 14px 12px; }
   .action-card > summary, .action-impacts > details > summary { align-items: flex-start; }

@@ -19,7 +19,8 @@ import {
   Bar,
 } from "recharts";
 import { Badge, Empty, ExportButton, ImportButton, Metric } from "./shared";
-import { downloadCsv, money, request } from "./api";
+import { downloadCsv, money } from "./api";
+import { diningApi } from "./api/dining";
 
 export default function Analytics({ data, run, busy }) {
   const [demo, setDemo] = useState(false);
@@ -35,13 +36,13 @@ export default function Analytics({ data, run, busy }) {
   const report = result?.key === queryKey ? result.data : null;
   useEffect(() => {
     let ignore = false;
-    const params = new URLSearchParams({
+    const params = {
       demo: String(demo),
       ...(start ? { start } : {}),
       ...(end ? { end } : {}),
       ...(stall ? { stall } : {}),
-    });
-    request(`/pos?${params}`)
+    };
+    diningApi.analytics.get(params)
       .then((next) => {
         if (!ignore) {
           setResult({ key: queryKey, data: next });
@@ -105,9 +106,7 @@ export default function Analytics({ data, run, busy }) {
             disabled={busy || demo}
             onFile={(file) =>
               run(async () => {
-                const result = await request("/pos/import", {
-                  csv: await file.text(),
-                });
+                const result = await diningApi.analytics.importCsv(await file.text());
                 setRevision((value) => value + 1);
                 return `导入 ${result.inserted} 行，跳过 ${result.skipped} 行，未映射 ${result.unmapped} 行`;
               })

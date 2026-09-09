@@ -47,6 +47,7 @@ test("feedback reply, aggregate action approval, monthly wordcloud and revision 
   expect(state.actions).toHaveLength(0);
   await page.screenshot({ path: testInfo.outputPath("feedback-action.png") });
   await dialog.getByRole("button", { name: "关闭", exact: true }).click();
+  await page.getByLabel("反馈月份").fill("2026-08");
   await page.getByRole("button", { name: "月度汇总", exact: true }).click();
   await expect(dialog.getByRole("img", { name: /反馈词云/ })).toBeVisible();
   await expect(dialog).toContainText("本月主要关注清淡素菜");
@@ -56,12 +57,11 @@ test("feedback reply, aggregate action approval, monthly wordcloud and revision 
   await page.getByRole("button", { name: "月度汇总", exact: true }).click();
   await expect(dialog).toContainText("该月暂无反馈，暂无词云或月度摘要");
   await dialog.getByRole("button", { name: "关闭", exact: true }).click();
-  const aggregate = page.getByRole("region", { name: "汇总改善事项", exact: true });
-  await aggregate.getByRole("button", { name: "汇总反馈生成改善事项" }).click();
-  await expect(aggregate).toContainText("关联 2 条反馈");
-  await aggregate.getByRole("button", { name: "进入 Action 模块", exact: true }).click();
+  await page.locator(".fd-hero").getByRole("button").click();
   await expect(page.getByRole("heading", { name: "Action 事项", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "汇总反馈生成改善事项", exact: true }).click();
   const card = page.locator(".action-card");
+  await expect(card).toContainText("2 条相关反馈");
   await card.locator("summary").first().click();
   await card.getByLabel("排菜调整要求").fill("午餐至少保留一种不辣素菜");
   await card.getByLabel("调整 / 审批理由").fill("本月反馈集中关注清淡菜");

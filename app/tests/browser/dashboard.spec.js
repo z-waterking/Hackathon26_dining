@@ -1,46 +1,100 @@
 import { test, expect } from "@playwright/test";
 
-test("feedback dashboard separates demo data and opens a three-column processing workspace", async ({ page }, testInfo) => {
+test("feedback home has four dashboards, a real word cloud and one Action entry", async ({ page }, testInfo) => {
   const errors = [];
+  const mutations = [];
   page.on("pageerror", (error) => errors.push(error.message));
-  await page.goto("/");
-  await expect(page.getByRole("tab", { name: "反馈总览" })).toHaveAttribute("aria-selected", "true");
-  await expect(page.locator(".fd-hero")).toContainText("提升用餐体验");
-  await page.getByLabel("反馈月份").fill("");
-  const stats = page.getByLabel("真实反馈统计");
-  const before = await stats.locator("strong").allTextContents();
-  await page.evaluate(() => window.scrollTo(0, 0));
-  await page.screenshot({ path: testInfo.outputPath("feedback-overview.png") });
-  const response = page.waitForResponse((item) => item.url().endsWith("/api/demo/actions"));
-  await page.getByRole("button", { name: "加载示例 Action", exact: true }).click();
-  const seeded = await (await response).json();
-  expect(seeded.feedbackIds).toHaveLength(12);
-  expect(seeded.actionIds).toHaveLength(4);
-  await expect(page.getByRole("checkbox", { name: "示例反馈", exact: true })).toBeChecked();
-  expect(await stats.locator("strong").allTextContents()).toEqual(before);
-  const aggregate = page.getByRole("region", { name: "汇总改善事项", exact: true });
-  await expect(aggregate).toContainText("12 条示例反馈");
-  await expect(aggregate.locator(".fd-action-previews > button")).toHaveCount(4);
-  await page.getByRole("tab", { name: "处理工作区" }).click();
-  const workspace = page.getByRole("region", { name: "反馈处理工作区", exact: true });
-  await expect(workspace.locator(".fd-inbox-list > button")).toHaveCount(12);
-  await expect(workspace.getByRole("heading", { name: "反馈详情", exact: true })).toBeVisible();
-  await expect(workspace).toContainText("示例反馈");
-  await expect(workspace.locator(".fd-inbox-insights")).toContainText("待审改善事项");
-  await expect(workspace.getByRole("button", { name: "批准 / Approve" })).toHaveCount(0);
-  await workspace.getByLabel("工作区本次处理说明").fill("已核对示例反馈，待Action模块统一审批。");
-  await workspace.getByRole("button", { name: "保存处理备注" }).click();
-  await expect(page.locator('.toast[role="status"]')).toContainText("处理备注与状态已保存");
-  await page.screenshot({ path: testInfo.outputPath("feedback-processing-workspace.png") });
-  await aggregate.getByRole("button", { name: "进入 Action 模块", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "Action 事项", exact: true })).toBeVisible();
-  await expect(page.getByLabel("排菜员 Prompt")).toHaveCount(0);
-  await page.getByRole("button", { name: "示例事项", exact: true }).click();
-  await expect(page.locator(".action-card")).toHaveCount(4);
+  page.on("request", (request) => { if (request.method() !== "GET" && /actions|analyze|summary/.test(request.url())) mutations.push(request.url()); });
   const data = await (await page.request.get("/api/data")).json();
-  expect(data.actions.filter((item) => item.demo)).toHaveLength(4);
-  expect(data.actions.filter((item) => item.demo).every((item) => item.feedbackIds.length > 1)).toBeTruthy();
+  const actual = data.feedback.filter((item) => !item.demo && !item.summaryRecord && !item.quarantined);
+  await page.goto("/");
+  await expect(page.getByRole("heading", { name: "反馈中心", exact: true })).toBeVisible();
+  await expect(page.getByRole("tablist", { name: "反馈视图" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "处理工作区", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "反馈台账", exact: true })).toHaveCount(0);
+  await expect(page.getByText("从反馈到改善事项", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "加载示例 Action", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "汇总反馈生成改善事项", exact: true })).toHaveCount(0);
+  const grid = page.locator(".fd-dashboard-grid");
+  await expect(grid.locator(":scope > section")).toHaveCount(4);
+  await expect(page.getByLabel("反馈月份")).toHaveValue("");
+  await expect(grid.locator(".fd-types-card")).toContainText(String(actual.length));
+  const cloud = grid.locator(".fd-cloud-card svg[role='img']");
+  await expect(cloud).toBeVisible();
+  await expect(cloud.locator("text").first()).toBeVisible();
+  const boxes = await grid.locator(":scope > section").evaluateAll((cards) => cards.map((card) => { const r = card.getBoundingClientRect(); return { x: r.x, y: r.y, width: r.width, height: r.height }; }));
+  expect(Math.max(...boxes.map((box) => box.height)) - Math.min(...boxes.map((box) => box.height))).toBeLessThan(2);
+  if (testInfo.project.name === "desktop") {
+    expect(Math.abs(boxes[0].y - boxes[1].y)).toBeLessThan(2);
+    expect(Math.abs(boxes[2].y - boxes[3].y)).toBeLessThan(2);
+    expect(boxes[2].y).toBeGreaterThan(boxes[0].y);
+  } else expect(boxes.every((box, index) => !index || box.y > boxes[index - 1].y)).toBeTruthy();
+  await expect(page.getByRole("region", { name: "反馈台账", exact: true })).toBeVisible();
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await page.screenshot({ path: testInfo.outputPath("feedback-home.png"), fullPage: true });
+  expect(mutations).toEqual([]);
+  await page.locator(".fd-hero").getByRole("button").click();
+  await expect(page.getByRole("heading", { name: "Action 事项", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "汇总反馈生成改善事项", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "加载示例 Action", exact: true })).toBeVisible();
+  await expect(page.getByLabel("排菜员 Prompt")).toHaveCount(0);
   expect(errors).toEqual([]);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBeTruthy();
+});
+
+test("dashboard type trends, external cloud and empty month share the selected real scope", async ({ page }, testInfo) => {
+  const data = await (await page.request.get("/api/data")).json();
+  const make = (id, type, date, extra = {}) => ({ id, type, date, restaurant: "测试档口", status: "未处理", content: "希望素菜清淡少油", summaryRecord: false, sources: [], events: [], ...extra });
+  const records = [make("F1", "投诉", "2026-08-01"), make("F2", "批评", "2026-08"),
+    make("F3", "建议", "2026-08-08"), make("F4", "建议", "2026-08-20"),
+    make("F5", "表扬", "2026-08-11", { status: "已完成" }), make("F6", "询问", "2026-08-27"),
+    make("F7", "建议", "2026-07-01"), make("F8", "建议", "2026-07-02"),
+    make("sample", "投诉", "2026-08-01", { demo: true }),
+    make("summary", "投诉", "2026-08", { summaryRecord: true }),
+    make("quarantine", "投诉", "2026-08-01", { quarantined: true })];
+  const words = ["清淡", "素菜", "少油", "出餐速度", "蔬菜", "口味", "午餐", "菜单", "选择", "价格", "营养", "品种", "保温", "份量", "轮换", "低盐"].map((text, index) => ({ text, count: Math.max(1, 8 - Math.floor(index / 2)) }));
+  await page.route("**/api/data", (route) => route.fulfill({ json: { ...data, feedback: records, imports: [] } }));
+  await page.route("**/api/feedback/insights?*", (route) => {
+    const month = new URL(route.request().url()).searchParams.get("month");
+    const selected = records.filter((item) => !item.demo && !item.summaryRecord && !item.quarantined && (!month || item.date.startsWith(month)));
+    return route.fulfill({ json: { month, total: selected.length, keywords: selected.length ? words : [] } });
+  });
+  await page.goto("/");
+  const grid = page.locator(".fd-dashboard-grid");
+  const distribution = grid.locator(".fd-types-card");
+  await expect(distribution).toContainText("8");
+  await expect(distribution).toContainText("批评");
+  await expect(grid.locator(".fd-trend-card")).toContainText("建议");
+  await expect(grid.locator(".fd-trend-card")).toContainText("表扬");
+  await page.getByLabel("示例反馈", { exact: true }).check();
+  await expect(distribution).toContainText("8");
+  await page.getByLabel("示例反馈", { exact: true }).uncheck();
+  await page.getByLabel("反馈月份").fill("2026-08");
+  await expect(distribution).toContainText("6");
+  const cloud = grid.locator(".fd-cloud-card svg[role='img']");
+  await expect(cloud).toBeVisible();
+  await expect(cloud.locator("text").first()).toBeVisible();
+  await page.evaluate(() => document.fonts.ready);
+  await grid.screenshot({ path: testInfo.outputPath("four-dashboards.png") });
+  const cloudGeometry = await cloud.evaluate((svg) => {
+    const bounds = svg.getBoundingClientRect();
+    return { bounds: { left: bounds.left, right: bounds.right, top: bounds.top, bottom: bounds.bottom },
+      words: [...svg.querySelectorAll("text")].filter((text) => text.textContent.trim()).map((text) => { const r = text.getBoundingClientRect(); return { text: text.textContent, size: Number.parseFloat(getComputedStyle(text).fontSize), left: r.left, right: r.right, top: r.top, bottom: r.bottom }; }) };
+  });
+  expect(cloudGeometry.words.length).toBeGreaterThan(6);
+  expect(new Set(cloudGeometry.words.map((word) => word.size)).size).toBeGreaterThan(2);
+  for (const [index, word] of cloudGeometry.words.entries()) {
+    expect(word.left).toBeGreaterThanOrEqual(cloudGeometry.bounds.left - 1);
+    expect(word.right).toBeLessThanOrEqual(cloudGeometry.bounds.right + 1);
+    expect(word.top).toBeGreaterThanOrEqual(cloudGeometry.bounds.top - 1);
+    expect(word.bottom).toBeLessThanOrEqual(cloudGeometry.bounds.bottom + 1);
+    for (const other of cloudGeometry.words.slice(index + 1))
+      expect(word.left >= other.right - 1 || word.right <= other.left + 1 || word.top >= other.bottom - 1 || word.bottom <= other.top + 1, `${word.text} overlaps ${other.text}`).toBeTruthy();
+  }
+  await page.getByLabel("反馈月份").fill("2025-01");
+  await expect(distribution).toContainText("0");
+  await expect(grid.locator(".fd-cloud-card svg text")).toHaveCount(0);
+  await expect(page.getByRole("region", { name: "反馈台账", exact: true })).toContainText("当前筛选下暂无反馈");
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBeTruthy();
 });
 

@@ -1,4 +1,4 @@
-import { useDeferredValue, useRef, useState } from "react";
+import { useDeferredValue, useEffect, useRef, useState } from "react";
 import {
   Plus,
   Search,
@@ -15,16 +15,15 @@ import {
   Modal,
   Pagination,
 } from "./shared";
-import { downloadCsv, request, uploadFeedback } from "./api";
+import { downloadCsv } from "./api";
+import { diningApi } from "./api/dining";
 import { ConversionReport, FeedbackResponse, MonthlyInsights } from "./FeedbackWorkflow";
 import ConvertedFeedbackTable from "./ConvertedFeedbackTable";
 import FeedbackOverview from "./FeedbackOverview";
-import FeedbackInbox from "./FeedbackInbox";
-import FeedbackActionsPanel from "./FeedbackActionsPanel";
 import "./feedback-dashboard.css";
 
 export default function Feedback({ data, run, busy, onNavigate }) {
-  const [month, setMonth] = useState("2026-08");
+  const [month, setMonth] = useState("");
   const [query, setQuery] = useState("");
   const search = useDeferredValue(query);
   const [status, setStatus] = useState("");
@@ -35,32 +34,43 @@ export default function Feedback({ data, run, busy, onNavigate }) {
   const [summary, setSummary] = useState(false);
   const [showSummaries, setShowSummaries] = useState(false);
   const [conversion, setConversion] = useState(null);
+  const [importOpen, setImportOpen] = useState(false);
+  const [importError, setImportError] = useState("");
   const [batchChoice, setBatchChoice] = useState(null);
-  const [view, setView] = useState("overview");
   const [demo, setDemo] = useState(false);
-  const [workspaceSelected, setWorkspaceSelected] = useState(null);
+  const [insights, setInsights] = useState(null);
+  const [insightsRetry, setInsightsRetry] = useState(0);
   const uploadReference = useRef(null);
   const ledgerReference = useRef(null);
-  const aggregateReference = useRef(null);
+  const insightsCurrent = insights?.month === month && insights?.feedback === data.feedback && insights?.retry === insightsRetry;
+  useEffect(() => {
+    let ignore = false;
+    diningApi.feedback.insights(month).then((result) => {
+      if (!ignore) setInsights({ month, feedback: data.feedback, retry: insightsRetry, result });
+    }).catch((error) => {
+      if (!ignore) setInsights({ month, feedback: data.feedback, retry: insightsRetry, error: error.message });
+    });
+    return () => { ignore = true; };
+  }, [month, data.feedback, insightsRetry]);
   const latestUpload = (data.imports || []).find((batch) => batch.uploaded);
   const displayedBatch = batchChoice === "hidden" ? null : batchChoice || latestUpload;
   const currentFeedback = selected && (data.feedback.find((item) => item.id === selected.id) || selected);
   const monthly = data.feedback.filter(
-    (item) => !item.demo && !item.quarantined && (!month || item.date.startsWith(month)),
+    (item) => !item.demo && !item.quarantined && (!month || item.date?.startsWith(month)),
   );
   const individual = monthly.filter((item) => !item.summaryRecord);
-  const listRecords = data.feedback.filter((item) => !item.quarantined && !!item.demo === demo && (!month || item.date.startsWith(month)));
+  const listRecords = data.feedback.filter((item) => !item.quarantined && !!item.demo === demo && (!month || item.date?.startsWith(month)));
   const items = listRecords
     .filter(
       (item) =>
-        item.summaryRecord === showSummaries &&
+        Boolean(item.summaryRecord) === showSummaries &&
         (!status || item.status === status) &&
-        (!type || item.type === type) &&
+        (!type || (type === "投诉" ? ["投诉", "批评"].includes(item.type) : item.type === type)) &&
         `${item.content} ${item.restaurant} ${item.owner} ${item.id}`
           .toLowerCase()
           .includes(search.toLowerCase()),
     )
-    .sort((left, right) => right.date.localeCompare(left.date));
+    .sort((left, right) => (right.date || "").localeCompare(left.date || ""));
   const currentPage = Math.min(page, Math.max(1, Math.ceil(items.length / 12)));
   const categories = Object.entries(
     individual.reduce(
@@ -85,38 +95,46 @@ export default function Feedback({ data, run, busy, onNavigate }) {
       疑似重复: item.duplicatePossible ? "待核验" : "",
       跟进: item.events.map((event) => event.text).join("\n"),
     }));
-  const openWorkspace = (item) => { setWorkspaceSelected(item.id); setDemo(!!item.demo); setView("inbox"); };
-  const showLedger = () => { setView("overview"); ledgerReference.current?.scrollIntoView({ behavior: "smooth", block: "start" }); };
-  const showAggregate = () => { aggregateReference.current?.scrollIntoView({ behavior: "smooth", block: "start" }); };
-  const loadDemo = () => run(async () => {
-    const result = await request("/demo/actions", {});
-    setDemo(true); setMonth(""); setQuery(""); setStatus(""); setType(""); setShowSummaries(false); setPage(1);
-    setWorkspaceSelected(result.feedbackIds?.[0] || null);
-    return `示例已就绪：${result.feedbackIds?.length || 12} 条反馈归纳为 ${result.actionIds?.length || 4} 项待审改善事项`;
-  });
+  const showLedger = (value) => {
+    setStatus(value); setDemo(false); setQuery(""); setType(""); setShowSummaries(false); setPage(1);
+    ledgerReference.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+  const importOriginal = (event) => {
+    const file = event.target.files[0];
+    event.target.value = "";
+    if (!file) return;
+    setImportError("");
+    run(async () => {
+      let result;
+      try { result = await diningApi.feedback.importOriginal(file); }
+      catch (error) { setImportError(error.message); throw error; }
+      setConversion(result); setBatchChoice(result); setImportOpen(false);
+      setMonth(""); setQuery(""); setType(""); setStatus(""); setShowSummaries(false); setPage(1); setDemo(false);
+      ledgerReference.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+      return `原始文件转换完成，新增 ${result.inserted} 条，重复 ${result.skipped} 条`;
+    });
+  };
   return (
     <div className="feedback-dashboard">
       <div className="page-heading">
         <div>
-          <span className="eyebrow">SERVICE / 01</span>
+          <span className="eyebrow">FEEDBACK / INTELLIGENCE</span>
           <h1>反馈中心</h1>
-          <p>听见每一份反馈，跟进每一次改善。</p>
+          <p>从反馈中看见趋势，让每一次改善都有依据。</p>
         </div>
         <div className="actions">
-          <button onClick={() => setSummary(true)}>
-            <FileText size={16} />
-            月度汇总
-          </button>
+          <button disabled={busy} onClick={() => { setImportError(""); setImportOpen(true); }}><FileInput size={17} />导入原始文件并转换</button>
           <button className="primary" onClick={() => setCreate(true)}>
             <Plus size={17} />
             录入反馈
           </button>
         </div>
       </div>
-      <div className="fd-view-tabs"><div role="tablist" aria-label="反馈视图"><button role="tab" aria-selected={view === "overview"} className={view === "overview" ? "active" : ""} onClick={() => setView("overview")}>反馈总览</button><button role="tab" aria-selected={view === "inbox"} className={view === "inbox" ? "active" : ""} onClick={() => setView("inbox")}>处理工作区</button><button onClick={showLedger}>反馈台账</button></div><label className="fd-demo-filter"><input type="checkbox" aria-label="示例反馈" checked={demo} onChange={(event) => { setDemo(event.target.checked); setMonth(""); setWorkspaceSelected(null); setPage(1); }} />示例反馈{demo && <Badge tone="gold">演示范围</Badge>}</label></div>
-      {view === "overview" ? <FeedbackOverview records={individual} month={month} onSelect={openWorkspace} onStatus={(value) => { setStatus(value); setDemo(false); setPage(1); showLedger(); }} onCreate={() => setCreate(true)} onUpload={() => uploadReference.current?.click()} onSummary={() => setSummary(true)} onAggregate={showAggregate} onDemo={loadDemo} /> : <FeedbackInbox data={data} demo={demo} selectedId={workspaceSelected} onSelect={setWorkspaceSelected} month={month} run={run} busy={busy} onNavigate={onNavigate} />}
-      <div ref={aggregateReference}><FeedbackActionsPanel data={data} demo={demo} run={run} busy={busy} onLoadDemo={loadDemo} onNavigate={onNavigate} /></div>
-      <section className="work-section fd-ledger" ref={ledgerReference}>
+      <FeedbackOverview records={individual} month={month} onNavigate={onNavigate} onStatus={showLedger}
+        insights={insightsCurrent ? insights.result : null} insightsLoading={!insightsCurrent}
+        insightsError={insightsCurrent ? insights.error : ""} onRetryInsights={() => setInsightsRetry((value) => value + 1)}
+        toolbar={<div className="fd-dashboard-toolbar"><div><h2>反馈洞察</h2><p>仅统计真实单条反馈 · 不含示例、月汇总与隔离记录</p></div><div className="actions"><label className="fd-period-filter">统计月份<input type="month" aria-label="反馈月份" value={month} onChange={(event) => { setMonth(event.target.value); setPage(1); }} /></label>{month ? <button className="text-button" onClick={() => { setMonth(""); setPage(1); }}>全部月份</button> : <Badge>全部月份</Badge>}<button onClick={() => setSummary(true)}><FileText size={15} />月度汇总</button></div></div>} />
+      <section className="work-section fd-ledger" ref={ledgerReference} aria-label="反馈台账">
         <div className="section-heading">
           <h2>
             反馈台账 <span>{items.length}</span>{demo && <Badge tone="gold">示例反馈</Badge>}
@@ -125,26 +143,13 @@ export default function Feedback({ data, run, busy, onNavigate }) {
             <label className={`button file-button ${busy ? "disabled" : ""}`}>
               <FileInput size={16} />
               上传旧表 Excel
-              <input ref={uploadReference} type="file" accept=".xlsx" aria-label="上传旧表 Excel" disabled={busy} onChange={(event) => {
-                const file = event.target.files[0];
-                event.target.value = "";
-                if (!file) return;
-                run(async () => {
-                  const result = await uploadFeedback(file);
-                  setConversion(result);
-                  setBatchChoice(result);
-                  setMonth(""); setQuery(""); setType(""); setStatus(""); setShowSummaries(false); setPage(1); setDemo(false);
-                  return `上传转换完成，新增 ${result.inserted} 条，重复 ${result.skipped} 条`;
-                });
-              }} />
+              <input ref={uploadReference} type="file" accept=".xlsx" aria-label="上传旧表 Excel" disabled={busy} onChange={importOriginal} />
             </label>
             <ImportButton
               disabled={busy}
               onFile={(file) =>
                 run(async () => {
-                  const result = await request("/feedback/import", {
-                    csv: await file.text(),
-                  });
+                  const result = await diningApi.feedback.importCsv(await file.text());
                   return `导入 ${result.inserted} 条，跳过 ${result.skipped} 条`;
                 })
               }
@@ -154,7 +159,7 @@ export default function Feedback({ data, run, busy, onNavigate }) {
             />
           </div>
         </div>
-        <p className="upload-guidance">上传 Forms 导出的原始旧表（.xlsx，最大 10 MB），系统自动转换为新表的 10 列并入库。无需上传模板；重复记录不新增、不覆盖人工处理。</p>
+        <p className="upload-guidance">上传旧表自动转换、入库；在台账中查看原文、回复与处理进度。</p>
         {conversion && (
           <div className="notice import-result" role="status">
             <strong>已按新餐厅反馈记录表格式转换</strong>
@@ -177,15 +182,6 @@ export default function Feedback({ data, run, busy, onNavigate }) {
               }}
             />
           </label>
-          <input
-            type="month"
-            aria-label="反馈月份"
-            value={month}
-            onChange={(event) => {
-              setMonth(event.target.value);
-              setPage(1);
-            }}
-          />
           <select
             aria-label="处理状态"
             value={status}
@@ -209,9 +205,10 @@ export default function Feedback({ data, run, busy, onNavigate }) {
           >
             <option value="">全部类型</option>
             {["建议", "投诉", "表扬", "询问"].map((value) => (
-              <option key={value}>{value}</option>
+              <option key={value} value={value}>{value === "投诉" ? "批评 / 投诉" : value}</option>
             ))}
           </select>
+          <label className="check"><input type="checkbox" aria-label="示例反馈" checked={demo} onChange={(event) => { setDemo(event.target.checked); setPage(1); }} />示例反馈</label>
           <label className="check">
             <input
               type="checkbox"
@@ -284,6 +281,13 @@ export default function Feedback({ data, run, busy, onNavigate }) {
         {!items.length && <Empty text="当前筛选下暂无反馈" />}
         <Pagination page={currentPage} setPage={setPage} count={items.length} />
       </section>
+      {importOpen && <Modal title="导入原始文件并转换" onClose={() => { if (!busy) setImportOpen(false); }}>
+        <p>选择 Forms 导出的原始餐饮反馈 Excel，系统会自动转换为新餐厅反馈记录表，保存到本地并展示转换结果。</p>
+        <div className="notice">仅需上传旧表，无需上传目标模板。支持 .xlsx，最大 10 MB；重复导入不会覆盖已有回复和处理记录。</div>
+        <p className="muted small">目标格式包含：反馈来源、序号、餐厅、日期、反馈内容、反馈跟进、反馈类别、问题分类、回复记录、备注。</p>
+        {importError && <p role="alert" className="notice import-error">{importError}</p>}
+        <label className={`button primary file-button ${busy ? "disabled" : ""}`}><FileInput size={17} />{busy ? "正在上传并转换…" : "选择原始 Excel 并转换"}<input type="file" accept=".xlsx" aria-label="选择原始 Excel 并转换" disabled={busy} onChange={importOriginal} /></label>
+      </Modal>}
       {create && (
         <Modal title="录入反馈" onClose={() => setCreate(false)}>
           <form
@@ -293,7 +297,7 @@ export default function Feedback({ data, run, busy, onNavigate }) {
                 new FormData(event.currentTarget),
               );
               run(async () => {
-                const result = await request("/feedback", input);
+                const result = await diningApi.feedback.create(input);
                 setCreate(false);
                 return result.merged ? "已追加到现有线程" : "反馈已入库";
               });
@@ -415,7 +419,7 @@ export default function Feedback({ data, run, busy, onNavigate }) {
                 new FormData(event.currentTarget),
               );
               run(async () => {
-                await request(`/feedback/${selected.id}`, input, "PATCH");
+                await diningApi.feedback.update(selected.id, input);
                 setSelected(null);
                 return "进度与跟进记录已保存";
               });
@@ -450,6 +454,7 @@ export default function Feedback({ data, run, busy, onNavigate }) {
           onClose={() => setSummary(false)}
           wide
         >
+          <Field label="月报月份"><input type="month" value={month} onChange={(event) => { setMonth(event.target.value); setPage(1); }} /></Field>
           <div className="summary-stats">
             <strong>{individual.length}</strong>
             <span>

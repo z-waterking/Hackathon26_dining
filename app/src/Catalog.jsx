@@ -17,7 +17,8 @@ import {
   Modal,
   Pagination,
 } from "./shared";
-import { downloadCsv, request } from "./api";
+import { downloadCsv } from "./api";
+import { diningApi } from "./api/dining";
 
 export default function Catalog({ data, run, busy }) {
   const [query, setQuery] = useState("");
@@ -50,7 +51,7 @@ export default function Catalog({ data, run, busy }) {
           <button
             onClick={() =>
               run(async () => {
-                setMaterials(await request("/materials"));
+                setMaterials(await diningApi.catalog.materials());
                 return "资料清单已读取";
               })
             }
@@ -218,9 +219,7 @@ export default function Catalog({ data, run, busy }) {
                         aria-label={`编辑${dish.name}`}
                         onClick={() =>
                           run(async () => {
-                            const evidence = await request(
-                              `/recipes/${dish.id}`,
-                            );
+                            const evidence = await diningApi.catalog.recipes(dish.id);
                             setRecipes(evidence);
                             setSelected(dish);
                             return "菜品资料已读取";
@@ -259,7 +258,7 @@ export default function Catalog({ data, run, busy }) {
                   fields.calories === "" ? null : Number(fields.calories),
               };
               run(async () => {
-                await request(`/dishes/${selected.id}`, input, "PATCH");
+                await diningApi.catalog.update(selected.id, input);
                 setSelected(null);
                 return "菜品标签已保存";
               });

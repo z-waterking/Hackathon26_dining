@@ -10,7 +10,8 @@ import {
   History,
 } from "lucide-react";
 import { Badge, Empty, ExportButton, Field, Metric, Modal } from "./shared";
-import { downloadCsv, request } from "./api";
+import { downloadCsv } from "./api";
+import { diningApi } from "./api/dining";
 import { menuRows } from "./menu-export";
 import { AiAvailability } from "./FeedbackWorkflow";
 import MenuWorkflow from "./MenuWorkflow";
@@ -71,7 +72,7 @@ export default function Menus({ data, run, busy }) {
     setMeal(next.meals[0]);
   }
   async function generate() {
-    const next = await request("/plans/generate", {
+    const next = await diningApi.plans.generate({
       scope: "all",
       start,
       seed,
@@ -246,7 +247,7 @@ export default function Menus({ data, run, busy }) {
                   disabled={busy}
                   onClick={() =>
                     run(async () => {
-                      setPlan(await request("/plans", plan));
+                      setPlan(await diningApi.plans.save(plan));
                       return "完整六周草案已保存为新版本";
                     })
                   }
@@ -360,9 +361,7 @@ export default function Menus({ data, run, busy }) {
                                         run(async () => {
                                           setRecipes(
                                             dish
-                                              ? await request(
-                                                  `/recipes/${dish.id}`,
-                                                )
+                                              ? await diningApi.catalog.recipes(dish.id)
                                               : [],
                                           );
                                           setDetailIndex(index);
@@ -493,7 +492,7 @@ export default function Menus({ data, run, busy }) {
                       ? { ...entry, dishId: replacement }
                       : entry,
                   );
-                  setPlan(await request("/plans/check", { ...plan, entries }));
+                  setPlan(await diningApi.plans.check({ ...plan, entries }));
                   setEditing(null);
                   return "菜品已替换，整份菜单已重新校验，尚未保存";
                 })
@@ -544,7 +543,7 @@ export default function Menus({ data, run, busy }) {
                   key={item.id}
                   onClick={() =>
                     run(async () => {
-                      showPlan(await request(`/plans/${item.id}`));
+                      showPlan(await diningApi.plans.get(item.id));
                       setHistory(false);
                       return "已读取完整草案";
                     })

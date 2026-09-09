@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { ArrowUpRight, RefreshCw, Table2 } from "lucide-react";
 import { Empty, Pagination } from "./shared";
 import { ConversionReport } from "./FeedbackWorkflow";
-import { request } from "./api";
+import { diningApi } from "./api/dining";
 
 export default function ConvertedFeedbackTable({ batch, feedback, onFollowUp, busy }) {
   const [response, setResponse] = useState(null);
@@ -13,7 +13,7 @@ export default function ConvertedFeedbackTable({ batch, feedback, onFollowUp, bu
   const error = current ? response.error : "";
   useEffect(() => {
     let ignore = false;
-    request(`/imports/${encodeURIComponent(batch.id)}/rows`).then((result) => { if (!ignore) setResponse({ result, retry, feedback, error: "" }); }).catch((failure) => { if (!ignore) setResponse({ result: null, retry, feedback, error: failure.message }); });
+    diningApi.imports.rows(batch.id).then((result) => { if (!ignore) setResponse({ result, retry, feedback, error: "" }); }).catch((failure) => { if (!ignore) setResponse({ result: null, retry, feedback, error: failure.message }); });
     return () => { ignore = true; };
   }, [batch.id, retry, feedback]);
   const rows = result?.rows || [];

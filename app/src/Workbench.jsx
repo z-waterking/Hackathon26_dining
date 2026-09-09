@@ -15,7 +15,7 @@ import {
 import Feedback from "./Feedback";
 import Catalog from "./Catalog";
 import Menus from "./Menus";
-import { request } from "./api";
+import { diningApi } from "./api/dining";
 import "./workbench.css";
 
 const Analytics = lazy(() => import("./Analytics"));
@@ -41,7 +41,7 @@ export default function Workbench() {
   }, [toast]);
   async function reload() {
     try {
-      const next = await request("/data");
+      const next = await diningApi.workspace.load();
       startTransition(() => setData(next));
       setError("");
     } catch (failure) {
@@ -50,7 +50,7 @@ export default function Workbench() {
   }
   useEffect(() => {
     let ignore = false;
-    request("/data")
+    diningApi.workspace.load()
       .then((next) => {
         if (!ignore) setData(next);
       })

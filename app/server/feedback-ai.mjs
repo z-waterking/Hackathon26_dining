@@ -144,18 +144,67 @@ function mentionedDiningTerms(content, vocabulary) {
   }
   return mentioned;
 }
+
+function diningKeywordCounts(store, records) {
+  const counts = new Map();
+  const vocabulary = keywordVocabulary(store);
+  for (const item of records) {
+    for (const term of mentionedDiningTerms(item.content, vocabulary))
+      counts.set(term, (counts.get(term) || 0) + 1);
+  }
+  return [...counts].map(([text, count]) => ({ text, count }))
+    .sort((a, b) => b.count - a.count || a.text.localeCompare(b.text, "zh-CN")).slice(0, 40);
+}
+
+const insightsScopeSchema = z.object({
+  month: z.union([z.literal(""), monthSchema]).default(""),
+}).strict();
+
+function feedbackMonth(item) {
+  const value = typeof item.date === "string" ? item.date.slice(0, 7) : "";
+  return monthSchema.safeParse(value).success ? value : "";
+}
+
+function countBy(records, key, fallback) {
+  const counts = new Map();
+  for (const item of records) {
+    const value = typeof item[key] === "string" && item[key].trim() ? item[key].trim() : fallback;
+    counts.set(value, (counts.get(value) || 0) + 1);
+  }
+  return Object.fromEntries([...counts].sort(([a], [b]) => a.localeCompare(b, "zh-CN")));
+}
+
+// Dashboard data is computed locally and deliberately does not access model
+// configuration, cached AI reports or write/audit methods. The same literal
+// per-feedback keyword count is also used by the existing monthly report.
+export function feedbackInsights(store, rawScope = {}) {
+  const { month } = insightsScopeSchema.parse(rawScope);
+  const records = store.all("feedback").filter((item) =>
+    !item.demo && !item.summaryRecord && !item.quarantined && (!month || feedbackMonth(item) === month));
+  const months = new Map();
+  let undated = 0;
+  for (const item of records) {
+    const key = feedbackMonth(item);
+    if (!key) { undated++; continue; }
+    if (!months.has(key)) months.set(key, []);
+    months.get(key).push(item);
+  }
+  return {
+    month, total: records.length, keywords: diningKeywordCounts(store, records),
+    byType: countBy(records, "type", "未分类"),
+    byStatus: countBy(records, "status", "未处理"),
+    byMonth: [...months].sort(([a], [b]) => a.localeCompare(b)).map(([key, items]) => ({
+      month: key, total: items.length, byType: countBy(items, "type", "未分类"),
+    })),
+    undated,
+  };
+}
+
 export function monthlySummary(store, month) {
   monthSchema.parse(month);
   const all = store.all("feedback").filter((item) => item.date?.startsWith(month) && !item.quarantined && !item.demo);
   const records = all.filter((item) => !item.summaryRecord);
-  const counts = new Map();
-  const vocabulary = keywordVocabulary(store);
-  for (const item of records) {
-    const terms = mentionedDiningTerms(item.content, vocabulary);
-    for (const term of terms) counts.set(term, (counts.get(term) || 0) + 1);
-  }
-  const keywords = [...counts].map(([text, count]) => ({ text, count }))
-    .sort((a, b) => b.count - a.count || a.text.localeCompare(b.text, "zh-CN")).slice(0, 40);
+  const keywords = diningKeywordCounts(store, records);
   const sourceFingerprint = hash({ keywordVersion: 2, keywords, records: records.map((item) => [item.id, fingerprint(item), item.status]) });
   const saved = store.get("meta", `feedback-summary-${month}`);
   const actions = store.all("actions").filter((action) => records.some((item) => item.id === action.feedbackId));
