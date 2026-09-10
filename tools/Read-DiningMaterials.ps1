@@ -33,6 +33,7 @@ $bookNumber = 0
 foreach ($file in $files) {
     $bookNumber++
     $bookId = 'book-{0:D2}' -f $bookNumber
+    $sourceSha256 = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
     $archive = [IO.Compression.ZipFile]::OpenRead($file.FullName)
     try {
         $workbook = Read-ZipXml $archive 'xl/workbook.xml'
@@ -86,13 +87,14 @@ foreach ($file in $files) {
             $sheetId = '{0}-sheet-{1:D3}' -f $bookId, $sheetNumber
             $state = $sheet.GetAttribute('state')
             $merges = @($sheetXml.SelectNodes('//*[local-name()="mergeCell"]') | ForEach-Object { $_.GetAttribute('ref') })
-            $data = [pscustomobject]@{ Source = [IO.Path]::GetRelativePath($Root, $file.FullName); Sheet = $sheet.GetAttribute('name'); State = $state; Merges = $merges; Rows = $rows.ToArray() }
+            $data = [pscustomobject]@{ Source = [IO.Path]::GetRelativePath($Root, $file.FullName); SourceSha256 = $sourceSha256; SourceBytes = $file.Length; Sheet = $sheet.GetAttribute('name'); State = $state; Merges = $merges; Rows = $rows.ToArray() }
             $data | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $output "$sheetId.json") -Encoding utf8
             $lines | Set-Content -LiteralPath (Join-Path $output "$sheetId.txt") -Encoding utf8
-            $inventory.Add([pscustomobject]@{ Id = $sheetId; Source = $data.Source; Sheet = $data.Sheet; State = $state; NonemptyRows = $rows.Count; NonemptyCells = ($rows | ForEach-Object { $_.Cells.Count } | Measure-Object -Sum).Sum; FormulaCount = $formulaCount; Errors = $errors.ToArray(); Merges = $merges.Count })
+            $inventory.Add([pscustomobject]@{ Id = $sheetId; Source = $data.Source; SourceSha256 = $sourceSha256; SourceBytes = $file.Length; Sheet = $data.Sheet; State = $state; NonemptyRows = $rows.Count; NonemptyCells = ($rows | ForEach-Object { $_.Cells.Count } | Measure-Object -Sum).Sum; FormulaCount = $formulaCount; Errors = $errors.ToArray(); Merges = $merges.Count })
         }
     }
     finally { $archive.Dispose() }
+    if ((Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant() -ne $sourceSha256) { throw "Source changed during inspection: $($file.Name)" }
 }
 $inventory | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $output 'inventory.json') -Encoding utf8
 if ($DetailedReport) {

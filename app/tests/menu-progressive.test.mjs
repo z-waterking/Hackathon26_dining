@@ -7,6 +7,37 @@ import { runMenuWorkflow, resumeMenuWorkflow } from "../server/menu-workflow.mjs
 import { directWeeklyResponse } from "./fixtures/direct-menu.mjs";
 import { PassThrough } from "node:stream";
 import { streamMenuProgress } from "../server/menu-progress-stream.mjs";
+import { cancellationError } from "../server/generation-tasks.mjs";
+
+test("explicit cancellation wakes a blocked progress write and releases the lock without waiting for its terminal frame to drain", { timeout: 2000 }, async t => {
+  const controller = new AbortController();
+  let output;
+  const reply = { raw: new PassThrough(), header() {}, send(stream) { output = stream; }, then() { throw new Error("must not await reply"); } };
+  t.after(() => { reply.raw.destroy(); output?.destroy(); });
+  let stopped = false;
+  let laterWork = false;
+  const pending = streamMenuProgress(reply, async emit => {
+    try {
+      await emit({ type: "week", runId: "cancel-slow-client", plan: { entries: Array(20000).fill({ dishId: "d" }) } }, { signal: controller.signal });
+      laterWork = true;
+      return { workflow: { runId: "cancel-slow-client" } };
+    } catch (error) { stopped = true; throw error; }
+  }, { drainTimeoutMs: 10000 });
+  await new Promise(resolve => setImmediate(resolve));
+  controller.abort(cancellationError());
+  await pending;
+  assert.equal(stopped, true);
+  assert.equal(laterWork, false);
+  assert.equal(reply.raw.destroyed, false);
+  // A browser that starts reading again receives the original checkpoint and
+  // the real cancellation event, even though business work already unlocked.
+  const events = [];
+  for await (const chunk of output) events.push(chunk.toString());
+  const frames = events.join("").trim().split("\n").map(line => JSON.parse(line));
+  assert.equal(frames[0].type, "week");
+  assert.equal(frames.at(-1).type, "error");
+  assert.equal(frames.at(-1).code, "GENERATION_CANCELLED");
+});
 
 const options = { scope: "all", start: "2026-09-14", meals: ["午餐", "晚餐"], seed: 3, count: 2, useAi: true };
 const deferred = () => Promise.withResolvers();

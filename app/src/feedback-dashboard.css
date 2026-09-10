@@ -68,3 +68,21 @@
   outline-offset: 3px;
 }
 .feedback-dashboard .import-error { color: #914135; background: #fff0ec; }
+
+:lang(en) .fd-ai-banner h2 { letter-spacing: 0; font-size: clamp(22px, 2.3vw, 29px); }
+:lang(en) .fd-ai-source > span, :lang(en) .fd-ai-output > span { gap: 5px; }
+:lang(en) .fd-ai-source > span > svg, :lang(en) .fd-ai-output > span > svg, :lang(en) .fd-ai-output em > svg { flex-shrink: 0; }
+:lang(en) .fd-dashboard-card { height: auto; min-height: 380px; }
+:lang(en) .fd-type-legend > div { grid-template-columns: minmax(0, 1fr) auto auto; }
+:lang(en) .fd-type-legend strong small { display: none; }
+:lang(en) .fd-type-name { overflow-wrap: anywhere; }
+:lang(en) .fd-handling-state-name { width: 88px; }
+:lang(en) .fd-handling-state-name > i { flex-shrink: 0; }
+:lang(en) .fd-handling-summary { flex-wrap: wrap; }
+:lang(en) .fd-card-total { flex-wrap: wrap; justify-content: flex-end; max-width: 80px; }
+:lang(en) .fd-trend-body > svg text { font-size: 10px; }
+@media (max-width: 760px) {
+  :lang(en) .fd-ai-banner p { max-width: 100%; }
+  :lang(en) .fd-ai-banner button { gap: 12px; }
+  :lang(en) .fd-trend-body > svg text { font-size: 13px; }
+}

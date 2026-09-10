@@ -151,7 +151,7 @@ test("Action status filtering changes cards without showing historical demo item
   expect(errors).toEqual([]);
 });
 
-test("Approving a filtered pending card retains its dialog and never reopens it after closing", async ({ page }) => {
+test("Approving a filtered pending card closes its dialog and preserves the approved revision when reopened", async ({ page }) => {
   const { state, writes, unexpected, errors } = await prepareCards(page);
   const status = page.getByLabel("Action 审批状态", { exact: true });
   const headings = page.locator(".action-card-grid > article.action-card h3");
@@ -163,15 +163,18 @@ test("Approving a filtered pending card retains its dialog and never reopens it 
   await dialog.getByRole("button", { name: "批准 / Approve", exact: true }).click();
   await expect(headings).toHaveText([MENU_TITLE]);
   await expect(cardFor(page, SERVICE_TITLE)).toHaveCount(0);
-  await expect(dialog).toBeVisible();
-  await expect(dialog).toContainText("已批准");
-  await expect(dialog.getByRole("button", { name: "保存调整", exact: true })).toBeEnabled();
-  expect(state.actions.find((item) => item.id === "A-CARD-SERVICE")).toMatchObject({ status: "approved", revision: 2 });
-  await dialog.getByRole("button", { name: "关闭", exact: true }).click();
   await expect(page.getByRole("dialog")).toHaveCount(0);
+  expect(state.actions.find((item) => item.id === "A-CARD-SERVICE")).toMatchObject({ status: "approved", revision: 2 });
   await status.selectOption("");
   await expect(headings).toHaveText([MENU_TITLE, SERVICE_TITLE, OPERATIONS_TITLE, REJECTED_TITLE]);
   await expect(cardFor(page, SERVICE_TITLE)).toContainText("已批准");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await cardFor(page, SERVICE_TITLE).getByRole("button", { name: "查看与审批", exact: true }).click();
+  await expect(dialog).toContainText("已批准");
+  await expect(dialog.getByRole("button", { name: "保存调整", exact: true })).toBeEnabled();
+  await dialog.locator(".audit-details > summary").click();
+  await expect(dialog).toContainText("高峰登记责任人已确认，批准试行一周并记录补菜等待时间。");
+  await dialog.getByRole("button", { name: "关闭", exact: true }).click();
   await expect(page.getByRole("dialog")).toHaveCount(0);
   expect(writes).toHaveLength(1);
   expect(writes[0]).toMatchObject({ id: "A-CARD-SERVICE", input: { status: "approved" } });
@@ -180,7 +183,7 @@ test("Approving a filtered pending card retains its dialog and never reopens it 
   expect(errors).toEqual([]);
 });
 
-test("Action modal edits, approvals and rejections refresh card state and retain the editor", async ({ page }) => {
+test("Action edits, approvals and rejections close the modal and retain saved state on reopening", async ({ page }) => {
   const { state, writes, unexpected, errors } = await prepareCards(page);
   await cardFor(page, MENU_TITLE).getByRole("button", { name: "查看与审批", exact: true }).click();
   const dialog = page.getByRole("dialog");
@@ -192,8 +195,9 @@ test("Action modal edits, approvals and rejections refresh card state and retain
   await dialog.getByLabel("排菜调整要求", { exact: true }).fill(instruction);
   await dialog.getByLabel("调整 / 审批理由", { exact: true }).fill("已与窗口核验现有人员和菜库容量，缩小为可执行的两周试行。");
   await dialog.getByRole("button", { name: "保存调整", exact: true }).click();
-  await expect(dialog.getByRole("button", { name: "保存调整", exact: true })).toBeEnabled();
+  await expect(dialog).toHaveCount(0);
   await expect(cardFor(page, updatedTitle)).toContainText(updatedDescription);
+  await cardFor(page, updatedTitle).getByRole("button", { name: "查看与审批", exact: true }).click();
   await expect(dialog).toHaveAccessibleName(updatedTitle);
   await expect(dialog.getByLabel("改善说明", { exact: true })).toHaveValue(updatedDescription);
   await expect(dialog.getByLabel("排菜调整要求", { exact: true })).toHaveValue(instruction);
@@ -201,10 +205,15 @@ test("Action modal edits, approvals and rejections refresh card state and retain
   expect(writes[0].input).toMatchObject({ title: updatedTitle, description: updatedDescription, menuInstruction: instruction });
   await dialog.getByLabel("调整 / 审批理由", { exact: true }).fill("供应与责任人均已确认，批准试行并在两周后验收。");
   await dialog.getByRole("button", { name: "批准 / Approve", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
   await expect(cardFor(page, updatedTitle)).toContainText("已批准");
-  await expect(dialog).toBeVisible();
-  await expect(dialog.getByRole("button", { name: "保存调整", exact: true })).toBeEnabled();
   expect(state.actions.find((item) => item.id === "A-CARD-MENU")).toMatchObject({ status: "approved", revision: 3, menuInstruction: instruction });
+  await cardFor(page, updatedTitle).getByRole("button", { name: "查看与审批", exact: true }).click();
+  await expect(dialog).toContainText("已批准");
+  await expect(dialog.getByRole("button", { name: "保存调整", exact: true })).toBeEnabled();
+  await dialog.locator(".audit-details > summary").click();
+  await expect(dialog).toContainText("已与窗口核验现有人员和菜库容量，缩小为可执行的两周试行。");
+  await expect(dialog).toContainText("供应与责任人均已确认，批准试行并在两周后验收。");
   await dialog.getByRole("button", { name: "关闭", exact: true }).click();
   await page.getByLabel("Action 审批状态", { exact: true }).selectOption("approved");
   await expect(page.locator(".action-card-grid h3")).toHaveText([updatedTitle, OPERATIONS_TITLE]);
@@ -214,10 +223,14 @@ test("Action modal edits, approvals and rejections refresh card state and retain
   await cardFor(page, SERVICE_TITLE).getByRole("button", { name: "查看与审批", exact: true }).click();
   await dialog.getByLabel("调整 / 审批理由", { exact: true }).fill("当前登记方案缺少交接责任人，暂不批准，待补齐后重审。");
   await dialog.getByRole("button", { name: "拒绝", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
   await expect.poll(() => state.actions.find((item) => item.id === "A-CARD-SERVICE").status).toBe("rejected");
   await expect(cardFor(page, SERVICE_TITLE)).toContainText("已拒绝");
-  await expect(dialog).toBeVisible();
+  await cardFor(page, SERVICE_TITLE).getByRole("button", { name: "查看与审批", exact: true }).click();
+  await expect(dialog).toContainText("已拒绝");
   await expect(dialog.getByRole("button", { name: "保存调整", exact: true })).toBeEnabled();
+  await dialog.locator(".audit-details > summary").click();
+  await expect(dialog).toContainText("当前登记方案缺少交接责任人，暂不批准，待补齐后重审。");
   await dialog.getByRole("button", { name: "关闭", exact: true }).click();
   await page.getByLabel("Action 审批状态", { exact: true }).selectOption("rejected");
   await expect(page.locator(".action-card-grid h3")).toHaveText([SERVICE_TITLE, REJECTED_TITLE]);

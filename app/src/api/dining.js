@@ -4,6 +4,11 @@ const idPart = (value) => {
   if (typeof value !== "string" || !value || value === "." || value === "..") throw new Error("记录ID无效");
   return encodeURIComponent(value);
 };
+const versionPart = (value) => {
+  const text = String(value);
+  if (!/^(0|[1-9][0-9]*)$/.test(text) || !Number.isSafeInteger(Number(text))) throw new Error("Prompt版本无效");
+  return text;
+};
 export function createDiningApi(options) {
   const http = createHttpClient(options);
   const get = (path, query) => http.send(path, { query });
@@ -11,6 +16,8 @@ export function createDiningApi(options) {
   const patch = (path, body) => http.send(path, { method: "PATCH", body });
   return Object.freeze({
     workspace: { load: () => get("/data") },
+    translations: { english: (texts) => post("/ui-translations", { texts }) },
+    generations: { cancel: (id) => post(`/generations/${idPart(id)}/cancel`) },
     feedback: {
       list: () => get("/feedback"),
       create: (input) => post("/feedback", input),
@@ -45,6 +52,11 @@ export function createDiningApi(options) {
     catalog: {
       list: () => get("/dishes"), materials: () => get("/materials"),
       recipes: (id) => get(`/recipes/${idPart(id)}`), update: (id, input) => patch(`/dishes/${idPart(id)}`, input),
+      create: (input) => post("/dishes", input),
+      remove: (id, input = {}) => http.send(`/dishes/${idPart(id)}`, { method: "DELETE", body: input }),
+      restore: (id, input = {}) => post(`/dishes/${idPart(id)}/restore`, input),
+      englishSummary: () => get("/dishes/english-summary"),
+      prepareEnglish: (input = {}) => post("/dishes/prepare-english", input),
     },
     plans: {
       list: () => get("/plans"), get: (id) => get(`/plans/${idPart(id)}`),
@@ -54,12 +66,17 @@ export function createDiningApi(options) {
       repair: (input) => post("/plans/repair", input),
       run: (id) => get(`/menu-runs/${idPart(id)}`),
       recoverableRuns: () => get("/menu-runs", { recoverable: true }),
-      resume: (id) => { idPart(id); return post("/plans/resume", { runId: id }); },
-      resumeProgressive: (id, options = {}) => { idPart(id); return http.stream("/plans/resume-stream", { ...options, method: "POST", body: { runId: id } }); },
+      resume: (id, { generationId } = {}) => { idPart(id); return post("/plans/resume", { runId: id, generationId }); },
+      resumeProgressive: (id, { generationId, ...options } = {}) => { idPart(id); return http.stream("/plans/resume-stream", { ...options, method: "POST", body: { runId: id, generationId } }); },
       result: (id) => get(`/menu-runs/${idPart(id)}/result`),
     },
     analytics: { get: (scope) => get("/pos", scope), importCsv: (csv) => post("/pos/import", { csv }) },
-    prompts: { get: () => get("/prompt-config"), save: (input) => http.send("/prompt-config", { method: "PUT", body: input }) },
+    prompts: {
+      get: () => get("/prompt-config"), save: (input) => http.send("/prompt-config", { method: "PUT", body: input }),
+      history: (query = {}) => get("/prompt-config/history", query),
+      historyVersion: (version) => get(`/prompt-config/history/${versionPart(version)}`),
+      restoreBase: (input) => post("/prompt-config/restore-base", input),
+    },
     system: { health: () => get("/health"), aiStatus: () => get("/ai/status"), audit: () => get("/audit") },
   });
 }

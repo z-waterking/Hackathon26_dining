@@ -12,12 +12,14 @@ import {
   RefreshCw,
   ListChecks,
   SlidersHorizontal,
+  Languages,
 } from "lucide-react";
 import Feedback from "./Feedback";
 import Catalog from "./Catalog";
 import Menus from "./Menus";
 import { diningApi } from "./api/dining";
 import { viewIds, viewFromHash, writeViewRoute } from "./view-route";
+import { I18nVisibility, useI18n } from "./i18n";
 import "./workbench.css";
 
 const Analytics = lazy(() => import("./Analytics"));
@@ -31,10 +33,12 @@ const navigation = [
   { id: "analytics", name: "消费分析", icon: ChartNoAxesCombined },
 ];
 export default function Workbench() {
+  const { t, tr, language, setLanguage } = useI18n();
   const [data, setData] = useState(null);
   const [view, setView] = useState(() => viewFromHash(window.location.hash));
   const [visited, setVisited] = useState(() => [view]);
   const [busy, setBusy] = useState(false);
+  const mutationInFlight = useRef(false);
   const [toast, setToast] = useState(null);
   const [error, setError] = useState("");
   const reloadSequence = useRef(0);
@@ -73,7 +77,9 @@ export default function Workbench() {
     let ignore = false;
     diningApi.workspace.load()
       .then((next) => {
-        if (!ignore) setData(next);
+        if (!ignore) {
+          setData(next);
+        }
       })
       .catch((failure) => {
         if (!ignore) setError(failure.message);
@@ -85,8 +91,8 @@ export default function Workbench() {
   async function run(action, { background = false } = {}) {
     // Long-running Action generation has its own page-local lock. Other pages
     // remain usable while it runs; completion still refreshes shared data.
-    if (!background && busy) return;
-    if (!background) setBusy(true);
+    if (!background && mutationInFlight.current) return;
+    if (!background) { mutationInFlight.current = true; setBusy(true); }
     try {
       const message = await action();
       await reload();
@@ -94,7 +100,7 @@ export default function Workbench() {
     } catch (failure) {
       setToast({ text: failure.message, error: true });
     } finally {
-      if (!background) setBusy(false);
+      if (!background) { mutationInFlight.current = false; setBusy(false); }
     }
   }
   const views = {
@@ -128,12 +134,12 @@ export default function Workbench() {
             <UtensilsCrossed size={23} />
           </span>
           <span>
-            <strong>餐叙</strong>
+            <strong>{t("餐叙", "Dining")}</strong>
             <small>DINING OPERATIONS</small>
           </span>
         </a>
-        <div className="workspace-label">BJW 园区餐饮</div>
-        <nav aria-label="主导航">
+        <div className="workspace-label">{t("BJW 园区餐饮", "BJW Campus Dining")}</div>
+        <nav aria-label={t("主导航", "Main navigation")}>
           {navigation.map(({ id, name, icon: Icon }, index) => (
             <button
               key={id}
@@ -142,7 +148,7 @@ export default function Workbench() {
               aria-current={view === id ? "page" : undefined}
             >
               <Icon size={19} />
-              <span>{name}</span>
+              <span>{t(name)}</span>
               <small>0{index + 1}</small>
             </button>
           ))}
@@ -150,15 +156,15 @@ export default function Workbench() {
         <div className="sidebar-bottom">
           <button className={`sidebar-prompt-link ${view === "prompts" ? "active" : ""}`} onClick={() => selectView("prompts")} aria-current={view === "prompts" ? "page" : undefined}>
             <SlidersHorizontal size={18} />
-            <span>Prompt 与规则</span>
+            <span>{t("Prompt 与规则")}</span>
           </button>
           <div className="sidebar-library">
             <div className="small-label">MATERIAL LIBRARY</div>
-            <strong>{data?.report.workbooks || "16"} 份工作簿</strong>
-            <p>{data?.report.sheets || "69"} 张工作表 · 本地资料</p>
+            <strong>{data?.report.workbooks || "16"} {t("份工作簿", "workbooks")}</strong>
+            <p>{data?.report.sheets || "69"} {t("张工作表 · 本地资料", "worksheets · Local sources")}</p>
             <div className="local-status">
               <span />
-              本地工作空间 <Database size={14} />
+              {t("本地工作空间", "Local workspace")} <Database size={14} />
             </div>
           </div>
         </div>
@@ -168,31 +174,37 @@ export default function Workbench() {
           <div>
             <span>BJW</span>
             <i>/</i>
-            {view === "prompts" ? "Prompt 与规则" : navigation.find((item) => item.id === view).name}
+            {t(view === "prompts" ? "Prompt 与规则" : navigation.find((item) => item.id === view).name)}
           </div>
           <div className="topbar-right">
+            <div className="language-switch" role="group" aria-label={t("界面语言", "Interface language")}>
+              <Languages size={15} aria-hidden="true" />
+              <button type="button" lang="zh-CN" aria-pressed={language === "zh"} onClick={() => setLanguage("zh")}>中文</button>
+              <button type="button" lang="en" aria-pressed={language === "en"} onClick={() => setLanguage("en")}>English</button>
+            </div>
             <span>
-              <CircleCheck size={14} /> 本地初版
+              <CircleCheck size={14} /> {t("本地初版", "Local edition")}
             </span>
-            <div className="avatar" title="本地可信操作人员">
-              运营
+            <div className="avatar" title={t("本地可信操作人员", "Local operator")}>
+              {t("运营", "Ops")}
             </div>
           </div>
         </header>
         <main>
-          {error ? (
+          {error && (
             <div className="error-panel">
-              <h2>数据加载失败</h2>
-              <p>{error}</p>
+              <h2>{data ? t("刷新失败，仍显示上次加载的数据", "Refresh failed. Showing previously loaded data") : t("数据加载失败", "Unable to load data")}</h2>
+              <p>{tr(error)}</p>
               <button onClick={reload}>
                 <RefreshCw size={16} />
-                重新加载
+                {t("重新加载")}
               </button>
             </div>
-          ) : !data ? (
-            <div className="loading">
+          )}
+          {!data ? (
+            !error && <div className="loading">
               <LoaderCircle className="spin" />
-              正在读取本地资料
+              {t("正在读取本地资料", "Loading local data…")}
             </div>
           ) : (
             visited.map((id) => {
@@ -200,9 +212,9 @@ export default function Workbench() {
               return (
                 <div key={id} hidden={view !== id}>
                   <Suspense
-                    fallback={<div className="loading">正在加载工作视图</div>}
+                    fallback={<div className="loading">{t("正在加载工作视图", "Loading workspace…")}</div>}
                   >
-                    <View data={data} run={run} busy={busy} onNavigate={selectView} />
+                    <I18nVisibility active={view === id}><View data={data} run={run} busy={busy} onNavigate={selectView} /></I18nVisibility>
                   </Suspense>
                 </div>
               );
@@ -210,8 +222,8 @@ export default function Workbench() {
           )}
         </main>
         <footer className="workspace-footer">
-          <span>餐叙 / BJW Dining</span>
-          <span>资料驱动 · 人工复核 · 可追溯</span>
+          <span>{t("餐叙 / BJW Dining", "Dining / BJW Dining")}</span>
+          <span>{t("资料驱动 · 人工复核 · 可追溯", "Source-based · Human-reviewed · Traceable")}</span>
         </footer>
       </div>
       {data && (
@@ -226,11 +238,11 @@ export default function Workbench() {
           className={`toast ${toast.error ? "toast-error" : ""}`}
           role={toast.error ? "alert" : "status"}
         >
-          <span>{toast.text}</span>
+          <span>{tr(toast.text)}</span>
           <button
             className="icon-button"
-            title="关闭通知"
-            aria-label="关闭通知"
+            title={t("关闭通知")}
+            aria-label={t("关闭通知")}
             onClick={() => setToast(null)}
           >
             <X size={18} />

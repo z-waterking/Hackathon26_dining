@@ -137,7 +137,10 @@ test("menu defaults to direct GPT with page-local waiting and genuine action exe
   await expect(aiCheckbox).toBeChecked();
   await expect(page.getByRole("checkbox", { name: "模拟排菜测试（不调用 AI）", exact: true })).toHaveCount(0);
   await expect(page.locator(".ai-planner-controls")).toContainText("菜品库已完成本地入库，从数据库按档口取菜");
-  await expect(page.getByRole("region", { name: "排菜 Action", exact: true })).toContainText("当前可用于排菜 1 项");
+  const actionPanel = page.getByRole("region", { name: "排菜 Action", exact: true });
+  await expect(actionPanel.getByRole("article")).toHaveCount(1);
+  await expect(actionPanel).toContainText("选择已核验不辣素菜");
+  await expect(actionPanel).not.toContainText("尚未批准的事项");
   await trigger.click();
   const waiting = page.getByRole("region", { name: "正在生成六周菜单", exact: true });
   await expect(waiting).toBeVisible();
@@ -427,7 +430,7 @@ test("failed generation resumes only its saved remaining weeks with local waitin
   await expect(page.getByRole("region", { name: "菜单质量评分", exact: true })).toBeVisible();
   await expect(page.locator(".plan-week")).toHaveCount(6);
   await expect(page.locator(".menu-generation-error")).toHaveCount(0);
-  expect(resumes).toEqual([{ runId: recoveryRun.id }]);
+  expect(resumes).toEqual([expect.objectContaining({ runId: recoveryRun.id, generationId: expect.any(String) })]);
   expect(requests).toHaveLength(1);
   expect(saves).toHaveLength(0);
   expect(recoveryReads.every((query) => query === "?recoverable=true")).toBe(true);
@@ -476,7 +479,7 @@ test("failed resume keeps the recovery ID and prior menu without an automatic re
   await expect(page.locator(".menu-generation-error")).toContainText("MR-RESUME-FAIL");
   await expect(page.locator(".menu-generation-wait")).toHaveCount(0);
   expect(await page.locator(".plan-week").allTextContents()).toEqual(before);
-  expect(resumes).toEqual([{ runId: "MR-RESUME-FAIL" }]);
+  expect(resumes).toEqual([expect.objectContaining({ runId: "MR-RESUME-FAIL", generationId: expect.any(String) })]);
   expect(requests).toHaveLength(1);
   expect(saves).toHaveLength(0);
   expect(unexpected).toEqual([]);
@@ -594,7 +597,7 @@ test("resume immediately displays the checkpoint and appends only completed rema
   await page.getByRole("button", { name: "恢复生成记录", exact: true }).click();
   await page.getByRole("dialog").getByRole("button", { name: "继续生成剩余周次" }).click();
   await expect.poll(() => page.evaluate(() => window.__menuTestStreams.length)).toBe(1);
-  expect(await page.evaluate(() => window.__menuTestStreams[0].input)).toEqual({ runId: recoveryRun.id });
+  expect(await page.evaluate(() => window.__menuTestStreams[0].input)).toEqual({ runId: recoveryRun.id, generationId: expect.any(String) });
   await emitMenuEvent(page, { type: "started", runId: "MR-STREAM-CHILD", totalWeeks: 6, completedWeeks: 2, currentWeek: 3, plan: partialFixture(2) });
   await expect(page.locator(".plan-week")).toHaveCount(2);
   await expect(page.locator(".menu-generation-wait")).toContainText("正在生成第 3 周菜单");

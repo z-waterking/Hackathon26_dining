@@ -1,4 +1,5 @@
 import { cloneElement, useEffect, useId, useRef } from "react";
+import { useI18n } from "./i18n";
 import {
   X,
   Download,
@@ -7,7 +8,8 @@ import {
   ChevronLeft,
   ChevronRight,
 } from "lucide-react";
-export function Modal({ title, onClose, children, wide = false }) {
+export function Modal({ title, onClose, children, wide = false, busy = false }) {
+  const { t } = useI18n();
   const reference = useRef(null);
   const titleId = useId();
   useEffect(() => {
@@ -20,20 +22,23 @@ export function Modal({ title, onClose, children, wide = false }) {
       ref={reference}
       className={wide ? "modal wide" : "modal"}
       aria-labelledby={titleId}
-      onCancel={(event) => { event.preventDefault(); onClose(); }}
+      aria-busy={busy}
+      onCancel={(event) => { event.preventDefault(); if (!busy) onClose(); }}
     >
       <header>
         <h2 id={titleId}>{title}</h2>
         <button
+          type="button"
           className="icon-button"
-          title="关闭"
-          aria-label="关闭"
-          onClick={onClose}
+          title={t("关闭")}
+          aria-label={t("关闭")}
+          disabled={busy}
+          onClick={() => { if (!busy) onClose(); }}
         >
           <X size={20} />
         </button>
       </header>
-      <div className="modal-body">{children}</div>
+      <div className="modal-body"><fieldset className="modal-controls" disabled={busy}>{children}</fieldset></div>
     </dialog>
   );
 }
@@ -47,18 +52,20 @@ export function Badge({ children, tone = "" }) {
   );
 }
 export function Empty({ text = "暂无记录" }) {
+  const { t } = useI18n();
   return (
     <div className="empty">
       <Inbox size={32} />
-      <p>{text}</p>
+      <p>{t(text)}</p>
     </div>
   );
 }
 export function Metric({ label, value, detail, icon: Icon, color = "green" }) {
+  const { t } = useI18n();
   return (
     <div className={`metric ${color}`}>
       <div>
-        <span>{label}</span>
+        <span>{t(label)}</span>
         <strong
           style={{
             fontSize:
@@ -71,17 +78,18 @@ export function Metric({ label, value, detail, icon: Icon, color = "green" }) {
         >
           {value}
         </strong>
-        <small>{detail}</small>
+        <small>{t(detail)}</small>
       </div>
       <Icon size={24} />
     </div>
   );
 }
 export function Field({ label, children }) {
+  const { t } = useI18n();
   const id = useId();
   return (
     <label className="field">
-      <span id={id}>{label}</span>
+      <span id={id}>{t(label)}</span>
       {children.props["aria-label"]
         ? children
         : cloneElement(children, { "aria-labelledby": id })}
@@ -89,20 +97,22 @@ export function Field({ label, children }) {
   );
 }
 export function ExportButton({ onClick, children = "导出 CSV" }) {
+  const { t } = useI18n();
   return (
     <button onClick={onClick}>
       <Download size={16} />
-      {children}
+      {t(children)}
     </button>
   );
 }
 export function ImportButton({ onFile, disabled }) {
+  const { t } = useI18n();
   return (
     <label className={`button file-button ${disabled ? "disabled" : ""}`}>
       <Upload size={16} />
-      导入 CSV
+      {t("导入 CSV")}
       <input
-        aria-label="导入 CSV"
+        aria-label={t("导入 CSV")}
         type="file"
         accept=".csv,text/csv"
         disabled={disabled}
@@ -116,14 +126,15 @@ export function ImportButton({ onFile, disabled }) {
   );
 }
 export function Pagination({ page, setPage, count, size = 12 }) {
+  const { t } = useI18n();
   const max = Math.max(1, Math.ceil(count / size));
   return (
     <div className="pagination">
-      <span>共 {count} 条</span>
+      <span>{t(`共 ${count} 条`, `${count} records`)}</span>
       <button
         className="icon-button"
-        title="上一页"
-        aria-label="上一页"
+        title={t("上一页")}
+        aria-label={t("上一页")}
         disabled={page <= 1}
         onClick={() => setPage(page - 1)}
       >
@@ -134,8 +145,8 @@ export function Pagination({ page, setPage, count, size = 12 }) {
       </span>
       <button
         className="icon-button"
-        title="下一页"
-        aria-label="下一页"
+        title={t("下一页")}
+        aria-label={t("下一页")}
         disabled={page >= max}
         onClick={() => setPage(page + 1)}
       >

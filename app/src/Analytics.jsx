@@ -21,8 +21,10 @@ import {
 import { Badge, Empty, ExportButton, ImportButton, Metric } from "./shared";
 import { downloadCsv, money } from "./api";
 import { diningApi } from "./api/dining";
+import { useI18n } from "./i18n";
 
 export default function Analytics({ data, run, busy }) {
+  const { t, tr } = useI18n();
   const [demo, setDemo] = useState(false);
   const [start, setStart] = useState("2026-08-01");
   const [end, setEnd] = useState("2026-08-31");
@@ -77,8 +79,8 @@ export default function Analytics({ data, run, busy }) {
       <div className="page-heading">
         <div>
           <span className="eyebrow">INSIGHTS / 04</span>
-          <h1>消费分析</h1>
-          <p>从真实交易出发，看清每一餐的选择。</p>
+          <h1>{t("消费分析")}</h1>
+          <p>{t("从真实交易出发，看清每一餐的选择。", "Understand dining choices through actual transactions.")}</p>
         </div>
         <div className="actions">
           <button
@@ -100,7 +102,7 @@ export default function Analytics({ data, run, busy }) {
             }
           >
             <FileDown size={16} />
-            CSV 模板
+            {t("CSV 模板", "CSV template")}
           </button>
           <ImportButton
             disabled={busy || demo}
@@ -108,7 +110,7 @@ export default function Analytics({ data, run, busy }) {
               run(async () => {
                 const result = await diningApi.analytics.importCsv(await file.text());
                 setRevision((value) => value + 1);
-                return `导入 ${result.inserted} 行，跳过 ${result.skipped} 行，未映射 ${result.unmapped} 行`;
+                return t(`导入 ${result.inserted} 行，跳过 ${result.skipped} 行，未映射 ${result.unmapped} 行`, `Imported ${result.inserted} rows; skipped ${result.skipped}; unmapped ${result.unmapped}`);
               })
             }
           />
@@ -122,12 +124,12 @@ export default function Analytics({ data, run, busy }) {
               className={period === value ? "active" : ""}
               onClick={() => selectPeriod(value)}
             >
-              {value}
+              {t(value)}
             </button>
           ))}
         </div>
         <input
-          aria-label="消费开始日期"
+          aria-label={t("消费开始日期", "Sales start date")}
           type="date"
           value={start}
           onChange={(event) => {
@@ -135,9 +137,9 @@ export default function Analytics({ data, run, busy }) {
             setPeriod("");
           }}
         />
-        <span className="muted">至</span>
+        <span className="muted">{t("至", "to")}</span>
         <input
-          aria-label="消费结束日期"
+          aria-label={t("消费结束日期", "Sales end date")}
           type="date"
           value={end}
           onChange={(event) => {
@@ -146,11 +148,11 @@ export default function Analytics({ data, run, busy }) {
           }}
         />
         <select
-          aria-label="消费档口"
+          aria-label={t("消费档口", "Sales stall")}
           value={stall}
           onChange={(event) => setStall(event.target.value)}
         >
-          <option value="">全部档口</option>
+          <option value="">{t("全部档口")}</option>
           {[...new Set(data.dishes.map((dish) => dish.stall))].map((name) => (
             <option key={name}>{name}</option>
           ))}
@@ -162,64 +164,63 @@ export default function Analytics({ data, run, busy }) {
             checked={demo}
             onChange={(event) => setDemo(event.target.checked)}
           />
-          演示数据
+          {t("演示数据", "Demo data")}
         </label>
       </div>
       {demo && (
         <p className="notice">
-          演示模式 ·
-          模拟交易仅用于界面演示，不写入真实数据库，不代表实际销售表现。
+          {t("演示模式 · 模拟交易仅用于界面演示，不写入真实数据库，不代表实际销售表现。", "Demo mode · Simulated transactions are for UI demonstration only. They are not stored as real data and do not represent actual sales.")}
         </p>
       )}
       {error ? (
         <p role="alert" className="notice">
-          {error}
+          {tr(error)}
         </p>
       ) : !report ? (
-        <Empty text="正在读取交易数据" />
+        <Empty text={t("正在读取交易数据", "Loading transactions…")} />
       ) : (
         <>
           <div className="metrics">
             <Metric
-              label="净消费金额"
+              label={t("净消费金额", "Net sales")}
               value={`¥ ${money(report.revenue)}`}
-              detail="销售金额减退款金额"
+              detail={t("销售金额减退款金额", "Sales minus refunds")}
               icon={Banknote}
             />
             <Metric
-              label="销售交易笔数"
+              label={t("销售交易笔数", "Sales transactions")}
               value={report.sales}
-              detail="按交易号去重 · 非就餐人数"
+              detail={t("按交易号去重 · 非就餐人数", "Unique transaction IDs · Not diner count")}
               icon={CreditCard}
               color="blue"
             />
             <Metric
-              label="平均每笔净额"
+              label={t("平均每笔净额", "Average net transaction")}
               value={`¥ ${money(report.average)}`}
-              detail="净金额 / 销售交易笔数"
+              detail={t("净金额 / 销售交易笔数", "Net sales / Sales transactions")}
               icon={TrendingUp}
               color="gold"
             />
             <Metric
-              label="菜品映射覆盖率"
+              label={t("菜品映射覆盖率", "Dish mapping coverage")}
               value={`${report.coverage}%`}
-              detail={`${report.unmapped} 行未映射明细`}
+              detail={t(`${report.unmapped} 行未映射明细`, `${report.unmapped} unmapped rows`)}
               icon={Link2}
               color="red"
             />
           </div>
           {!report.rows ? (
             <div className="no-pos">
-              <Empty text="当前期间暂无真实 POS 交易" />
-              <p>待接入供应商明细 · 菜品销量与就餐人数暂不可计算</p>
+              <Empty text={t("当前期间暂无真实 POS 交易", "No real POS transactions in this period")} />
+              <p>{t("待接入供应商明细 · 菜品销量与就餐人数暂不可计算", "Awaiting supplier records · Dish sales and diner counts are not yet available")}</p>
             </div>
           ) : (
             <>
               <div className="chart-grid">
                 <section className="work-section">
                   <div className="section-heading">
-                    <h2>每日净消费</h2>
-                    <Badge>{demo ? "模拟数据" : "导入交易"}</Badge>
+                    <h2>{t("每日净消费", "Daily net sales")}</h2>
+                    <Badge>{demo ? t("模拟数据", "Demo data") : t("导入交易", "Imported transactions")}</Badge>
                   </div>
                   <div className="chart-box">
                     <ResponsiveContainer width="100%" height="100%">
@@ -246,7 +247,7 @@ export default function Analytics({ data, run, busy }) {
                           tickLine={false}
                         />
                         <Tooltip
-                          formatter={(value) => [`¥ ${money(value)}`, "净金额"]}
+                          formatter={(value) => [`¥ ${money(value)}`, t("净金额", "Net sales")]}
                         />
                         <Area
                           type="monotone"
@@ -262,7 +263,7 @@ export default function Analytics({ data, run, busy }) {
                 </section>
                 <section className="work-section">
                   <div className="section-heading">
-                    <h2>档口净收入</h2>
+                    <h2>{t("档口净收入", "Net revenue by stall")}</h2>
                   </div>
                   <div className="chart-box">
                     <ResponsiveContainer width="100%" height="100%">
@@ -281,7 +282,7 @@ export default function Analytics({ data, run, busy }) {
                           tickLine={false}
                         />
                         <Tooltip
-                          formatter={(value) => [`¥ ${money(value)}`, "净收入"]}
+                          formatter={(value) => [`¥ ${money(value)}`, t("净收入")]}
                         />
                         <Bar
                           dataKey="revenue"
@@ -298,16 +299,16 @@ export default function Analytics({ data, run, busy }) {
               <section className="work-section">
                 <div className="section-heading">
                   <h2>
-                    菜品净销量排行 <span>同单位比较</span>
+                    {t("菜品净销量排行", "Dish sales ranking")} <span>{t("同单位比较", "Same-unit comparison")}</span>
                   </h2>
                   <div className="actions">
                     <select
-                      aria-label="销量计价单位"
+                      aria-label={t("销量计价单位", "Sales quantity unit")}
                       value={unit}
                       onChange={(event) => setUnit(event.target.value)}
                     >
                       {["份", "个", "斤", "100g", "位"].map((value) => (
-                        <option key={value}>{value}</option>
+                        <option key={value} value={value}>{t(value)}</option>
                       ))}
                     </select>
                     <ExportButton
@@ -330,11 +331,11 @@ export default function Analytics({ data, run, busy }) {
                   <table>
                     <thead>
                       <tr>
-                        <th>排名</th>
-                        <th>菜品</th>
-                        <th>档口</th>
-                        <th>净销量</th>
-                        <th>净消费额</th>
+                        <th>{t("排名")}</th>
+                        <th>{t("菜品")}</th>
+                        <th>{t("档口")}</th>
+                        <th>{t("净销量")}</th>
+                        <th>{t("净消费额")}</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -359,10 +360,10 @@ export default function Analytics({ data, run, busy }) {
                   </table>
                 </div>
                 {!ranking.length && (
-                  <Empty text="当前单位下没有已映射菜品明细" />
+                  <Empty text={t("当前单位下没有已映射菜品明细", "No mapped dishes for this unit")} />
                 )}
                 <p className="small muted spaced">
-                  排名依据净售出数量，未按上架天数、可售时长或备货量校正，不等同偏好或满意度。
+                  {t("排名依据净售出数量，未按上架天数、可售时长或备货量校正，不等同偏好或满意度。", "Ranks use net quantity sold without adjusting for availability or stock. They do not measure preference or satisfaction.")}
                 </p>
               </section>
             </>

@@ -18,7 +18,7 @@ test("feedback reply, aggregate action approval, monthly wordcloud and revision 
   await page.route("**/api/actions/summary?*", (route) => json(route, { analysis, sourceCount: state.feedback.length, actions: state.actions }));
   let generationCalls = 0;
   await page.route("**/api/actions/summarize", (route) => {
-    expect(route.request().postDataJSON()).toEqual({ month: "", demo: false, force: true });
+    expect(route.request().postDataJSON()).toEqual({ month: "", demo: false, force: true, generationId: expect.any(String) });
     generationCalls++;
     analysis = { id: "SUMMARY-UI-1", sourceCount: state.feedback.length, summary: "多条反馈共同建议增加清淡素菜。", createdAt: "2026-09-08T03:00:00Z" };
     state.actions = [{ id: "A-UI-1", source: "aggregate", demo: false, feedbackIds: [feedback.id, secondFeedback.id], evidence: [{ feedbackId: feedback.id, quote: feedback.content }, { feedbackId: secondFeedback.id, quote: secondFeedback.content }], title: "增加清淡素菜", description: "核验：检查素菜供应；措施：试行清淡素菜；验收：记录顾客评价", targetStall: "全部档口", menuInstruction: "优先选用不辣素菜", priority: "medium", status: "pending", enabled: true, revision: 1, history: [] }];
@@ -75,11 +75,14 @@ test("feedback reply, aggregate action approval, monthly wordcloud and revision 
   await actionDialog.getByLabel("排菜调整要求").fill("午餐至少保留一种不辣素菜");
   await actionDialog.getByLabel("调整 / 审批理由").fill("本月反馈集中关注清淡菜");
   await actionDialog.getByRole("button", { name: "批准 / Approve" }).click();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
   await expect(card).toContainText("已批准");
-  await expect(actionDialog).toContainText("已批准");
   expect(state.actions[0].menuInstruction).toBe("午餐至少保留一种不辣素菜");
   expect(state.actions[0].status).toBe("approved");
   expect(state.actions[0].revision).toBe(2);
+  await card.getByRole("button", { name: "查看与审批" }).click();
+  await expect(actionDialog).toContainText("已批准");
+  await expect(actionDialog.getByLabel("排菜调整要求")).toHaveValue("午餐至少保留一种不辣素菜");
   await actionDialog.locator(".audit-details > summary").click();
   await expect(actionDialog).toContainText("本月反馈集中关注清淡菜");
   await expect(page.locator(".action-module").getByText(/Prompt/)).toHaveCount(0);
@@ -104,10 +107,11 @@ test("menu workflow shows inspector result, action evidence and trace", async ({
   const baseline = await (await page.request.post("/api/plans/generate", { data: { scope: "all", start: "2026-09-07", seed: 1, count: 4, meals: ["午餐"], useAi: false } })).json();
   const action = { id: "A-UI-PLAN", title: "增加清淡菜", targetStall: "全部档口", revision: 3, instruction: "优先清淡菜", status: "partial", baselineEntries: 10, selectedEntries: 14, changedEntries: 4, evidence: ["清淡菜槽位由 10 增加到 14。"] };
   baseline.workflow = { runId: "RUN-UI-1", status: "needs_review", promptVersion: 2, requiresHumanApproval: true, stale: false, planner: { summary: "已结合批准反馈和规则编排六周菜单。", unresolved: [] }, inspector: { verdict: "pass", summary: "清淡菜已增加，标签未知部分需运营确认。", findings: [] }, actionImpacts: [action], inspectedAt: "2026-09-08T05:00:00Z" };
+  const privatePrompt = "PRIVATE_PROMPT_FIXTURE_DO_NOT_DISPLAY_52b1";
   await page.route("**/api/data", (route) => route.fulfill({ json: { ...data, aiStatus: { configured: true, model: "test-model" }, actions: [{ ...action, status: "approved", enabled: true }] } }));
   let generation;
   await page.route("**/api/plans/generate-stream", (route) => { generation = route.request().postDataJSON(); return route.fulfill({ contentType: "application/x-ndjson", body: `${JSON.stringify({ type: "completed", runId: "RUN-UI-1", plan: baseline })}\n` }); });
-  await page.route("**/api/menu-runs/RUN-UI-1", (route) => route.fulfill({ json: { id: "RUN-UI-1", status: "needs_review", input: generation, snapshots: { actions: [action], rules: [] }, workflow: baseline.workflow } }));
+  await page.route("**/api/menu-runs/RUN-UI-1", (route) => route.fulfill({ json: { id: "RUN-UI-1", status: "needs_review", input: generation, snapshots: { actions: [action], rules: [], prompts: { systemPrompt: privatePrompt } }, systemPrompt: privatePrompt, workflow: baseline.workflow } }));
   await page.goto("/");
   await page.getByRole("navigation").getByRole("button", { name: /六周菜单/ }).click();
   await page.getByRole("checkbox", { name: "启用 AI 排菜员与检验员" }).check();
@@ -123,7 +127,10 @@ test("menu workflow shows inspector result, action evidence and trace", async ({
   await expect(dialog).toContainText("RUN-UI-1");
   await dialog.locator("summary").filter({ hasText: "Action 快照" }).click();
   await expect(dialog).toContainText("增加清淡菜");
-  await expect(dialog.getByText(/Prompt/)).toHaveCount(0);
+  await expect(dialog.locator("input, textarea, select")).toHaveCount(0);
+  await expect(dialog.locator("summary").filter({ hasText: /Prompt/i })).toHaveCount(0);
+  for (const section of ["排菜范围", "规则快照", "排菜决策", "检验结果"]) await dialog.locator("summary").filter({ hasText: section }).click();
+  await expect(dialog).not.toContainText(privatePrompt);
   await dialog.getByRole("button", { name: "关闭", exact: true }).click();
   expect(errors).toEqual([]);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBeTruthy();

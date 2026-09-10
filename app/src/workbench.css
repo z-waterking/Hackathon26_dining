@@ -1272,6 +1272,19 @@ details {
   display: block;
   margin-top: 6px;
 }
+.modal-controls {
+  min-inline-size: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.language-switch { display: flex; align-items: center; gap: 3px; border: 1px solid var(--border); border-radius: 7px; padding: 3px; background: #f6f9f6; flex-shrink: 0; }
+.language-switch > svg { color: #668575; margin: 0 3px; }
+.language-switch button { border: 0; min-height: 29px; padding: 4px 8px; font-size: 11px; background: transparent; color: #6c8176; }
+.language-switch button[aria-pressed="true"] { color: #216b55; background: white; box-shadow: 0 1px 4px #203b2414; }
+.translation-status { margin: 0 0 15px; color: #657e70; font-size: 12px; line-height: 1.7; }
+.translation-status button { padding: 3px 8px; font-size: 11px; }
+html[lang="en-US"] .sidebar nav button { font-size: 12px; }
 .ai-availability {
   display: flex;
   align-items: center;
@@ -1531,4 +1544,14 @@ details {
   .history-list button {
     white-space: normal;
   }
+}
+
+@media (max-width: 760px) {
+  .topbar { min-height: 55px; height: auto; gap: 8px; padding-top: 8px; padding-bottom: 8px; }
+  .topbar-right > span { display: none; }
+  .topbar .topbar-right { gap: 0; }
+  html[lang="en-US"] .sidebar nav { overflow-x: auto; }
+  html[lang="en-US"] .sidebar nav button { flex: 0 0 auto; min-width: max-content; padding-inline: 10px; font-size: 11px; line-height: 1.5; }
+  html[lang="en-US"] .sidebar nav button svg { flex-shrink: 0; }
+  .language-switch > svg { display: none; }
 }

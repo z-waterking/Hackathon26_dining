@@ -1,7 +1,7 @@
 // Stable data port used by domain services. Concrete SQL belongs in adapters.
 export const COLLECTIONS = Object.freeze([
   "feedback", "dishes", "plans", "transactions", "meta", "actions",
-  "settings", "menuRuns", "imports", "aiUsage", "audit",
+  "settings", "menuRuns", "imports", "aiUsage", "audit", "catalogEnglish",
 ]);
 export function collectionName(value) {
   if (!COLLECTIONS.includes(value)) throw new Error("Unknown collection");

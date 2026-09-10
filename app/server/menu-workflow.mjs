@@ -312,7 +312,8 @@ function workflowSummary(run, plan, inspector, impacts) {
   };
 }
 
-async function inspectRun({ store, ai, run, plan, baseline }) {
+async function inspectRun({ store, ai, run, plan, baseline, signal }) {
+  signal?.throwIfAborted();
   const { snapshots } = run;
   plan = withPolicyValidation(plan, run.planner.decisions);
   const impacts = run.generationMode === "gpt-direct" ? directActionImpacts(plan, run.planner, snapshots.actions, snapshots.dishes) : actionImpacts(plan, baseline, run.planner, snapshots.actions, snapshots.dishes);
@@ -327,7 +328,9 @@ async function inspectRun({ store, ai, run, plan, baseline }) {
   run.plan = plan;
   run.inspectorInput = input;
   store.put("menuRuns", run.id, run);
-  const response = await ai.respond({ role: "inspector", prompt: snapshots.prompts.inspector, input, schema: z.toJSONSchema(inspectorSchema), maxOutputTokens: 9000 });
+  signal?.throwIfAborted();
+  const response = await ai.respond({ role: "inspector", prompt: snapshots.prompts.inspector, input, schema: z.toJSONSchema(inspectorSchema), maxOutputTokens: 9000, signal });
+  signal?.throwIfAborted();
   const result = inspectorSchema.parse(response.data);
   const actions = new Set(snapshots.actions.map((action) => action.id));
   const rules = new Set(snapshots.rules.map((rule) => rule.id));
@@ -355,6 +358,7 @@ async function inspectRun({ store, ai, run, plan, baseline }) {
     }
   }
   const inspector = aiResult(response, result);
+  signal?.throwIfAborted();
   if (run.generationMode === "gpt-direct") assertDirectSnapshot(store, run);
   const workflow = workflowSummary(run, plan, inspector, impacts);
   run.workflow = workflow;
@@ -377,20 +381,29 @@ function withPolicyValidation(plan, decisions) {
   return { ...plan, validation: { ...plan.validation, issues, errors: issues.filter((issue) => issue.level === "error").length, warnings: issues.filter((issue) => issue.level === "warning").length } };
 }
 
-function failRun(store, run, error) {
+function isCancelled(error, signal) {
+  return signal?.aborted || error?.code === "GENERATION_CANCELLED";
+}
+
+function failRun(store, run, error, signal) {
+  const cancelled = isCancelled(error, signal);
   run.failedStage = run.stage;
-  run.stage = "failed";
-  run.status = "failed";
-  run.error = error instanceof z.ZodError ? "AI 返回的菜单工作流结构无效，请重试或人工处理" : error.message;
-  run.diagnostics = { ...safeDiagnostics(error, run.currentWeek), ...(run.currentStall && run.failedStage === "planning" ? { stall: run.currentStall } : {}) };
+  run.stage = cancelled ? "cancelled" : "failed";
+  run.status = run.stage;
+  run.error = cancelled ? "菜单生成已取消，已完成的周次和档口记录已保留，可稍后继续。"
+    : error instanceof z.ZodError ? "AI 返回的菜单工作流结构无效，请重试或人工处理" : error.message;
+  run.diagnostics = { ...safeDiagnostics(error, run.currentWeek), ...(cancelled ? { code: "GENERATION_CANCELLED" } : {}),
+    ...(run.currentStall && run.failedStage === "planning" ? { stall: run.currentStall } : {}) };
   run.completedAt = new Date().toISOString();
   store.put("menuRuns", run.id, run);
-  throw Object.assign(new Error(run.error), { statusCode: error.statusCode || 502, runId: run.id, diagnostics: run.diagnostics });
+  throw Object.assign(new Error(run.error), { statusCode: cancelled ? 409 : error.statusCode || 502,
+    ...(cancelled ? { code: "GENERATION_CANCELLED" } : {}), runId: run.id, diagnostics: run.diagnostics });
 }
 
 function safeDiagnostics(error, week) {
   const detail = error.diagnostics || {};
-  return { code: /^[A-Z0-9_]{1,80}$/.test(detail.code || "") ? detail.code : error instanceof z.ZodError ? "MENU_SCHEMA_INVALID" : "MENU_GENERATION_FAILED",
+  return { code: error.code === "GENERATION_CANCELLED" ? "GENERATION_CANCELLED"
+    : /^[A-Z0-9_]{1,80}$/.test(detail.code || "") ? detail.code : error instanceof z.ZodError ? "MENU_SCHEMA_INVALID" : "MENU_GENERATION_FAILED",
     week: Number.isInteger(detail.week) ? detail.week : week,
     ...Object.fromEntries(["stall", "day", "meal", "slot", "dishIndex"].filter(key =>
       typeof detail[key] === "number" || typeof detail[key] === "string" && detail[key].length <= 120).map(key => [key, detail[key]])),
@@ -413,7 +426,8 @@ function assertDirectSnapshot(store, run) {
 }
 
 /** All-stall, six-week draft. Model suggestions never constitute approval. */
-export async function runMenuWorkflow({ store, ai, input, settings, ruleSourcePath, onProgress }) {
+export async function runMenuWorkflow({ store, ai, input, settings, ruleSourcePath, onProgress, signal }) {
+  signal?.throwIfAborted();
   if (input.demo === true) throw new Error("模拟排菜必须使用显式的模拟排菜测试入口，不会调用真实 AI");
   const options = batchOptionsSchema.parse({ ...input, scope: "all" });
   const snapshots = captureSnapshots(store, settings, false);
@@ -426,12 +440,13 @@ export async function runMenuWorkflow({ store, ai, input, settings, ruleSourcePa
   const run = { id: `MR-${randomUUID()}`, demo: false, generationMode: "gpt-direct", plannerVersion: snapshots.planningMode === "per-stall" ? STALL_MENU_VERSION : DIRECT_MENU_VERSION,
     promptHash: directPromptHash(snapshots), ruleSourcePath, createdAt: new Date().toISOString(), stage: "planning", status: "running", input: options, snapshots, plannerBatches: [], plannerAttempts: [], stallBatches: [] };
   store.put("menuRuns", run.id, run);
-  return continueDirectRun({ store, ai, run, context, weeks: [], onProgress });
+  return continueDirectRun({ store, ai, run, context, weeks: [], onProgress, signal });
 }
 
-async function planStallWeek({ store, ai, run, context, week, weeks }) {
+async function planStallWeek({ store, ai, run, context, week, weeks, signal }) {
   const results = [];
   for (const item of stallPlanningOrder(context)) {
+    signal?.throwIfAborted();
     assertDirectSnapshot(store, run);
     run.currentStall = item.stall;
     const request = stallRequest(run.snapshots, run.input, context, item, week, weeks.map(w => w.compact), results);
@@ -441,6 +456,7 @@ async function planStallWeek({ store, ai, run, context, week, weeks }) {
     let best;
     let correction;
     for (let attempt = 1; attempt <= (fixed ? 1 : 3); attempt++) {
+      signal?.throwIfAborted();
       assertDirectSnapshot(store, run);
       const record = { week, stall: item.stall, attempt, status: "running", createdAt: new Date().toISOString() };
       if (!fixed) run.plannerAttempts.push(record);
@@ -449,10 +465,13 @@ async function planStallWeek({ store, ai, run, context, week, weeks }) {
       try {
         const input = { ...request.input, ...(correction ? { qualityCorrection: correction } : {}) };
         if (JSON.stringify(input).length > 1200000) throw new Error("档口输入超过安全长度，未截断候选或前序菜单");
+        signal?.throwIfAborted();
         response = fixed ? { data: fixed, model: "source-rules-no-ai", usage: {} }
-          : await ai.respond({ role: "planner", prompt: directPrompt(request.snapshots), input, schema: z.toJSONSchema(request.schema), maxOutputTokens: 6500 });
+          : await ai.respond({ role: "planner", prompt: directPrompt(request.snapshots), input, schema: z.toJSONSchema(request.schema), maxOutputTokens: 6500, signal });
+        signal?.throwIfAborted();
       } catch (error) {
-        record.status = "failed"; record.diagnostics = { ...safeDiagnostics(error, week), stall: item.stall };
+        record.status = isCancelled(error, signal) ? "cancelled" : "failed";
+        record.diagnostics = { ...safeDiagnostics(signal?.aborted ? signal.reason : error, week), stall: item.stall };
         record.completedAt = new Date().toISOString(); store.put("menuRuns", run.id, run); throw error;
       }
       Object.assign(record, aiResult(response, { data: response.data }), { status: "received", completedAt: new Date().toISOString() });
@@ -460,12 +479,15 @@ async function planStallWeek({ store, ai, run, context, week, weeks }) {
       let result;
       try { result = materializeStall(response.data, request, run.input, week, item); }
       catch (error) {
+        signal?.throwIfAborted();
+        if (isCancelled(error)) throw error;
         record.status = "invalid"; record.diagnostics = safeDiagnostics(error, week);
         store.put("menuRuns", run.id, run);
         if (attempt === 3) { if (best) break; throw error; }
         correction = { diagnostics: record.diagnostics, previousOutput: response.data, instruction: "修正当前档口结构与引用，返回完整本周对象" };
         continue;
       }
+      signal?.throwIfAborted();
       const quality = fixed ? { count: 0, issues: [] } : stallQuality(result, request, run.input, week, weeks);
       record.status = quality.count ? "quality_review" : "accepted"; record.quality = quality;
       store.put("menuRuns", run.id, run);
@@ -473,6 +495,7 @@ async function planStallWeek({ store, ai, run, context, week, weeks }) {
       if (!quality.count || attempt === 3 || fixed) break;
       correction = { target: 80, previousOutput: best.response.data, issues: best.quality.issues, instruction: "只优化当前档口本周可修复冲突，不能改前序菜单、伪造标签或跨档口选菜" };
     }
+    signal?.throwIfAborted();
     assertDirectSnapshot(store, run);
     if (!best) throw new Error(`第${week}周${item.stall}没有可用菜单结果`);
     results.push(best.result);
@@ -480,6 +503,7 @@ async function planStallWeek({ store, ai, run, context, week, weeks }) {
       ...aiResult(best.response, { summary: best.result.summary }), format: STALL_MENU_VERSION, sourceRunId: run.id, mode: fixed ? "source-rule" : "ai" });
     store.put("menuRuns", run.id, run);
   }
+  signal?.throwIfAborted();
   const merged = mergeStallWeek(week, results, context, run.snapshots.actions, run.input);
   const verified = materializeWeek(merged.raw, run.snapshots, run.input, context, week);
   return { ...verified, raw: merged.raw };
@@ -500,24 +524,28 @@ function partialMenu(run, context, weeks) {
   };
 }
 
-async function continueDirectRun({ store, ai, run, context, weeks, onProgress }) {
+async function continueDirectRun({ store, ai, run, context, weeks, onProgress, signal }) {
   const { snapshots, input: options } = run;
   const progress = async type => {
+    signal?.throwIfAborted();
     if (!onProgress) return;
     // Only materialized, checkpointed weeks are visible. No schema/raw output,
     // internal prompts, ungenerated slots or premature inspection claims.
     await onProgress({ type, runId: run.id, totalWeeks: 6, completedWeeks: weeks.length,
       currentWeek: type === "started" ? Math.min(6, weeks.length + 1) : run.currentWeek || weeks.length,
       ...(weeks.length ? { plan: partialMenu(run, context, weeks) } : {}),
-    });
+    }, { signal });
+    signal?.throwIfAborted();
   };
   try {
     await progress("started");
     for (let week = weeks.length + 1; week <= 6; week++) {
+      signal?.throwIfAborted();
       assertDirectSnapshot(store, run);
       run.currentWeek = week;
       if (snapshots.planningMode === "per-stall") {
-        const result = await planStallWeek({ store, ai, run, context, week, weeks });
+        const result = await planStallWeek({ store, ai, run, context, week, weeks, signal });
+        signal?.throwIfAborted();
         weeks.push(result);
         run.plannerBatches.push({ week, format: DIRECT_MENU_VERSION, summary: result.summary, warnings: result.warnings,
           model: run.stallBatches.find(batch => batch.week === week && batch.mode === "ai")?.model || "source-rules-no-ai", usage: sumPlannerUsage(run.stallBatches.filter(batch => batch.week === week)), result: result.raw });
@@ -531,19 +559,22 @@ async function continueDirectRun({ store, ai, run, context, weeks, onProgress })
       let response;
       let correction;
       for (let attempt = 1; attempt <= 3; attempt++) {
+        signal?.throwIfAborted();
         assertDirectSnapshot(store, run);
         const record = { week, attempt, status: "running", createdAt: new Date().toISOString() };
         run.plannerAttempts.push(record);
         store.put("menuRuns", run.id, run);
         try {
+          signal?.throwIfAborted();
           response = await ai.respond({ role: "planner", prompt: snapshots.prompts.planner,
             input: { ...batchInput, ...(correction ? { correction } : {}) },
-            schema: z.toJSONSchema(weeklySchema(context, options)), maxOutputTokens: 14000 });
+            schema: z.toJSONSchema(weeklySchema(context, options)), maxOutputTokens: 14000, signal });
+          signal?.throwIfAborted();
         } catch (error) {
           // A timeout/transport failure may still be billable upstream. Never
           // automatically retry it; explicit resume is a new user decision.
-          record.status = "failed";
-          record.diagnostics = safeDiagnostics(error, week);
+          record.status = isCancelled(error, signal) ? "cancelled" : "failed";
+          record.diagnostics = safeDiagnostics(signal?.aborted ? signal.reason : error, week);
           record.completedAt = new Date().toISOString();
           store.put("menuRuns", run.id, run);
           throw error;
@@ -554,11 +585,14 @@ async function continueDirectRun({ store, ai, run, context, weeks, onProgress })
         store.put("menuRuns", run.id, run);
         assertDirectSnapshot(store, run);
         try {
+          signal?.throwIfAborted();
           result = materializeWeek(response.data, snapshots, options, context, week);
           record.status = "accepted";
           store.put("menuRuns", run.id, run);
           break;
         } catch (error) {
+          signal?.throwIfAborted();
+          if (isCancelled(error)) throw error;
           record.status = "invalid";
           record.diagnostics = safeDiagnostics(error, week);
           store.put("menuRuns", run.id, run);
@@ -567,12 +601,14 @@ async function continueDirectRun({ store, ai, run, context, weeks, onProgress })
             instruction: "只修正本周不合法的输出并返回完整本周对象；尽量保持其他已合法槽位。之前成功周次不允许改动。仍须满足同一档口局部索引、人工菜单、固定出品及行动范围约束。" };
         }
       }
+      signal?.throwIfAborted();
       weeks.push(result);
       run.plannerBatches.push({ week, format: DIRECT_MENU_VERSION, ...aiResult(response, { summary: result.summary, warnings: result.warnings }), result: response.data });
       store.put("menuRuns", run.id, run);
       // Flush this week's actual dishes before requesting the next week.
       await progress("week");
     }
+    signal?.throwIfAborted();
     const entries = context.stalls.flatMap(stall => weeks.flatMap(w => w.entries.filter(e => e.stall === stall)));
     const previous = store.all("plans").filter(p => p.scope === "all" && !p.demo).at(-1);
     const plan = checkMenu(snapshots.dishes, { ...options, generationMode: "gpt-direct", stalls: context.stalls, entries }, previous, { fixedDishes: snapshots.fixedDishes });
@@ -588,9 +624,12 @@ async function continueDirectRun({ store, ai, run, context, weeks, onProgress })
       acceptedOutputUsage: sumPlannerUsage(snapshots.planningMode === "per-stall" ? run.stallBatches : run.plannerBatches),
       reusedUsage: sumPlannerUsage((snapshots.planningMode === "per-stall" ? run.stallBatches : run.plannerBatches).filter(batch => batch.sourceRunId && batch.sourceRunId !== run.id)),
     };
+    signal?.throwIfAborted();
+    run.stage = "inspecting";
+    store.put("menuRuns", run.id, run);
     await progress("inspecting");
-    return await inspectRun({ store, ai, run, plan, baseline: null });
-  } catch (error) { return failRun(store, run, error); }
+    return await inspectRun({ store, ai, run, plan, baseline: null, signal });
+  } catch (error) { return failRun(store, run, error, signal); }
 }
 
 const LEGACY_TEMPLATE_SHA256 = "68706a10c753eb855f383701b36ed9120828a18b6b7f099f989c62972d764f07";
@@ -638,7 +677,8 @@ function resumeContext(store, prior, settings, ruleSourcePath) {
   return { snapshots, options, context, weeks };
 }
 
-export async function resumeMenuWorkflow({ store, ai, runId, settings, ruleSourcePath, onProgress }) {
+export async function resumeMenuWorkflow({ store, ai, runId, settings, ruleSourcePath, onProgress, signal }) {
+  signal?.throwIfAborted();
   const prior = store.get("menuRuns", runId);
   const { snapshots, options, context, weeks } = resumeContext(store, prior, settings, ruleSourcePath);
   if (store.all("menuRuns").some(run => run.parentRunId === runId && run.status !== "failed" && run.status !== "cancelled"))
@@ -649,7 +689,7 @@ export async function resumeMenuWorkflow({ store, ai, runId, settings, ruleSourc
     stage: weeks.length === 6 ? "inspecting" : "planning", status: "running", input: options, snapshots,
     resumedWeeks: weeks.length, plannerAttempts: [], stallBatches: clone(prior.stallBatches || []), plannerBatches: clone(prior.plannerBatches).map(batch => ({ ...batch, format: batch.format || prior.plannerVersion, sourceRunId: batch.sourceRunId || prior.id })) };
   store.put("menuRuns", run.id, run);
-  return continueDirectRun({ store, ai, run, context, weeks, onProgress });
+  return continueDirectRun({ store, ai, run, context, weeks, onProgress, signal });
 }
 
 export function menuRecoveryRecords(store, settings) {

@@ -23,7 +23,7 @@ test("generation animation stays on Action page while other pages remain usable"
   });
   await page.route("**/api/actions/summarize", async (route) => {
     calls++;
-    expect(route.request().postDataJSON()).toEqual({ month: "", demo: false, force: true });
+    expect(route.request().postDataJSON()).toEqual({ month: "", demo: false, force: true, generationId: expect.any(String) });
     await generation;
     state.actions = [{ id: "A-WAIT", source: "aggregate", demo: false, title: "增加清淡素菜", description: "核验菜库，试行增加清淡素菜并收集评价。", targetStall: "全部档口", feedbackIds: [feedback.id], evidence: [{ feedbackId: feedback.id, quote: feedback.content }], status: "pending", revision: 1 }];
     generated = true;

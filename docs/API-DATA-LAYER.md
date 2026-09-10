@@ -39,10 +39,26 @@ flowchart LR
 | `GET /api/imports/:id/rows` | 指定转换批次十列新表 |
 | `GET /api/imports/:id/download?format=xlsx` | 新格式工作簿；也支持csv |
 | `GET /api/prompt-config` | 专用配置DTO、当前启用规则、已批准排菜Action与实际组合Prompt预览 |
+| `GET /api/prompt-config/history?page=1&pageSize=10` | Base及所有已确认历史的分页摘要；pageSize最大50 |
+| `GET /api/prompt-config/history/:version` | 指定版本完整只读配置快照，0表示固定Base |
+
+### 英文显示层
+
+语言切换仅用于开发的界面文字。`t()` 读取内置界面词表，`tr()`/`sourceText()` 原样返回业务内容；词云直接使用原词和计数。API client不加载显示译文，不更改业务字段。`GET /api/data`、`GET /api/prompt-config`及菜单流不注入 `uiTranslations`；旧兼容 `POST /api/ui-translations` 仍只读缓存，当前页面不调用它。
+
+已取消保存、生成里程碑与读接口里的自动翻译处理。此前的离线预翻译模块不参与正常请求；已有 `meta.ui-translation:*` 不删除，但也不用于界面或改写业务。语言切换没有额外模型开销。
+
+反馈、回复、关键词、Action正文、规则、Prompt、菜单与审核快照保持原语言。字段名、开发的状态标签等可英文显示；原始JSON保留原键和值。编辑框无翻译依赖，未修改值与手工输入均按原文保存。
+
+客户端合并为每批最多20段/10,000字符，并限制每个页面会话自动准入200段/40,000字符（重试也计入）；额外内容保持deferred，由明确点击继续获得下一批额度。切回中文暂停未发请求，切语言不重置额度。此处是展示层的自动请求保护，不替代服务端账户预算或鉴权。
 
 ### Prompt 配置写入与运行快照
 
 `diningApi.prompts.save` 使用 `PUT /api/prompt-config`，严格提交 `{version,baseFingerprint,actionGenerationText,menuSystemText,approvedActionText,rules}`；成功返回新配置及预览。保存原子写入 `meta.prompt-config:current`、`meta.prompt-config:version-N` 与audit，不写原始 `meta.rules`、菜品或Action审批。版本或来源变化返回409，无变更不写多余历史。此页是用户显式要求的可见业务Prompt边界，`/api/data`、菜单运行等原有接口仍过滤 `promptConfig`、原始Prompt/输入、尝试记录和密钥；旧`/api/settings`接口保持停用。
+
+服务启动在来源同步后幂等初始化`meta.prompt-config:base`，只冻结未覆盖的源规则与默认业务文本，不把当前已编辑配置误作Base，不写current、不改变其版本。首次确认/复原也会在同一事务保障Base存在。`baseFingerprint`仍是原先的来源/配置乐观锁，不是新Base内容ID；固定Base单独提供内容fingerprint。已有历史version-N保留原样。新版本保存operation（confirm/restore-base）、上一版本、三项文本与完整规则、内容指纹及变更摘要；历史读取不重新用最新源规则推导原文。所有历史保留在本地SQLite，无按条数裁剪。
+
+`diningApi.prompts.restoreBase`通过`POST /api/prompt-config/restore-base`严格提交`{version,baseFingerprint}`。复原和确认一样乐观锁校验，原子写入新的current/version-N/audit并返回最新组合预览；不会删历史、回拨版本、修改原始规则或Action。恢复的三项文本和规则来自不可修改Base；若本来与Base相同且来源未变，不新增无意义版本。只读历史接口不调用模型、不写数据库；历史快照是当时配置，不是附带当前Action/菜库的伪历史请求。
 
 新排菜运行保存menuSystem/approvedAction文本与版本、有效规则及独立原始sourceRules快照，每档读取该快照不读取最新配置。运行中保存新版本不混入当前已选菜单；旧菜单会显示配置过期，恢复/复检禁止混合版本。人工/固定出品属性始终依据原始来源，不根据可编辑文案猜测；其他本地硬校验只读展示，文本编辑不自动更改程序阈值。
 
@@ -73,7 +89,7 @@ flowchart LR
 
 ### 常驻排菜 Action 当前清单
 
-六周菜单的常驻排菜Action面板复用 `diningApi.workspace.load()` 返回的 `actions`，与Action模块共用保存后的刷新，不新增本地数据副本或隐藏的AI调用。`shared/menu-action-state.mjs` 为纯状态投影；前端展示和服务端 `approvedMenuActions` 共用 `isApprovedMenuAction`，统一正式数据、反馈关联、审批、启用及非空排菜要求的参与条件。服务与其他无排菜要求的改善分开统计。当前面板是下一次生成的候选要求，`workflow.actionImpacts` 仍是该菜单生成/检验时的证据，两者不相互覆盖。
+六周菜单的精简排菜Action清单复用 `diningApi.workspace.load()` 返回的 `actions`，与Action模块共用保存后的刷新，不新增本地数据副本。`shared/menu-action-state.mjs` 为纯状态投影；前端展示和服务端 `approvedMenuActions` 共用 `isApprovedMenuAction`，统一正式数据、反馈关联、审批、启用及非空排菜要求的参与条件。清单只展示eligible事项的标题与排菜要求，不显示统计、不可用事项或服务事项；原参与判定不变。当前清单是下一次生成的候选要求，`workflow.actionImpacts` 仍是该菜单生成/检验时的证据，两者不相互覆盖。英文模式只切换界面，Action内容保留原文，不生成新Action或菜单。
 
 ### 菜单冲突定点修复
 
@@ -99,6 +115,38 @@ Host 仅允许 loopback，以及 `lan` 模式下本机实际网卡的 RFC1918 �
 
 停止脚本只关闭隧道和网关，不停止应用。电脑须保持运行和联网；Quick Tunnel 重启后地址改变且没有 SLA，两种认证模式均不验证公司身份。此入口用于短期演示，固定域名及公司 SSO 需另行配置 Cloudflare Access。
 
+## 菜品维护 API
+
+`diningApi.catalog.create/update/remove/restore` 分别使用 `POST /api/dishes`、`PATCH /api/dishes/:id`、`DELETE /api/dishes/:id` 和 `POST /api/dishes/:id/restore`。新增返回 201，其余返回 200 及当前菜品；所有写入为同源 JSON 请求，不经过 AI。基础字段包括 name/stall/english/price/unit/category，保留既有标签字段。档口须已存在或已映射；售价为 0–10000 的有限数字。服务端生成 ID，拒绝客户端伪造 sources、origin、revision、deletedAt 等元数据。
+
+编辑/删除/恢复接受 `expectedRevision`；旧数据视为 revision 0，新建为 1，每次真实修改递增。旧标签编辑客户端不传版本仍兼容。相同档口、名称、价格、单位的新增/身份调整不能重复；历史已有重复记录仍允许维护标签。删除/恢复重试幂等。业务修改和 `dish.created/updated/archived/restored` 审计在同一事务提交，冲突及错误不产生部分写入。菜单任务正在运行时拒绝写入，不中断用户任务。
+
+删除写 `deletedAt`、`active:false` 并保留之前启用状态，不物理删行；恢复还原状态，遇到当前身份重复则拒绝。`GET /api/dishes` 和工作区快照仍含归档记录用于历史菜单引用，菜品资料默认隐藏并可筛选。原始 sources、配方及文件不修改；首次身份调整另存 sourceName/sourceIdentity，配方证据按原始名称查询，不把新名称冒认为另一份配方。
+
+人工新建标记 `origin:manual`；身份或分类调整标记 `catalogManualOverride`。运行时 readStallCatalog 将这些明确维护项加入目标档口，保留旧 Excel 映射且人工来源不冒充原表；未映射的旧导入记录不会因此混入主来源候选，停用/归档/主食杂粮仍排除。固定出品、价位、源硬规则及恢复快照校验不绕过。当前历史菜单依赖菜品 ID 和既有当前库显示机制，修改菜名/价格会影响显示；已有运行快照不重写，菜库变更会使旧检验过期并要求重新检验。
+
+## 菜品英文名持久化
+
+`GET /api/dishes/english-summary` 通过query service只读返回 `{total,ready,missing,needsReview,uniqueMissing}`。`POST /api/dishes/prepare-english` 仅接受可选generationId，从本地库选择未归档且英文为空的记录；不接受自由文本翻译参数。结果追加 `{filled,reused,generated,batches}`，filled/reused按菜品行数，generated按去重菜名数。共享取消接口可停止该任务，完成批次保留。所有浏览/保存/语言切换仍不发起AI。
+
+SQLite结构v2新增 `catalogEnglish(id TEXT PRIMARY KEY,data TEXT NOT NULL)`，仍经repository读写。ID为精确trim菜名SHA256，缓存带sourceName/english/origin/model/requestId/createdAt/protocolVersion（dish-english-v1）。不去内部空白、不跨不同名字猜测同义。存在多个冲突来源译名时不任意选一；已有人工/来源优先，不能被AI降级覆盖。菜品的 `english` 和 `englishName` 是直接展示字段，元数据包含配对sourceName、origin（source/manual/ai）、status（ready/needs_review/missing）、updatedAt及适用的model/requestId。
+
+模型每批只接收不超过50个 `{id,sourceName}`，不附反馈、档口、配方或来源文件。使用现有 Responses strict JSON，仍在服务端核验每个ID、完整性、长度、英文字符及重复引用；结构错误整批不写入，不自动重试。每批缓存+菜品+audit事务提交；回写前比对原name/english/revision及归档状态，跳过模型期间被用户变更的记录，既有非空英文不覆盖。已返回用量沿aiUsage记录。
+
+API、CLI以及不同repository实例用 `meta.catalog-english-lease` 互斥：UUID owner、10分钟expiresAt，获取/续期/写前核对/释放均为事务，过期可接管，旧owner不得写结果或释放新租约。进程内也防重复；取消检查在每次调用和提交前后执行。CLI对历史dish_names running行不永久阻断，由租约判断活跃；仅显式重试，不自动复活工作。
+
+人工修改英文设manual状态；无效或夹中文英文保留待复核，不自动改写原文。AI译名始终待复核，原样保存不升级。改中文名且英文未同步改变时清当前英文，旧配对保留 `englishHistory` 最近20条；与配方追溯sourceName分开。仅英文维护不刷新标签verifiedAt、不改变来源候选标记和菜单业务快照指纹。
+
+## 显式取消生成
+
+`diningApi.generations.cancel(generationId)` 发送 `POST /api/generations/:id/cancel`，JSON body 为 `{}`。Action `/actions/summarize`、菜单 `/plans/generate[-stream]` 和 `/plans/resume[-stream]` 接受可选 `generationId`；服务端在领域 schema 校验前提取它，不写入菜单配置。浏览器每次显式生成或续排创建新的安全随机 UUID，同一任务的取消只操作这个 ID，不使用“取消当前所有任务”的全局状态。旧无 ID 请求继续兼容，但没有对应取消入口。
+
+取消返回 `{id, status, cancelled}`：活动任务先是 `cancelling/true`，结束后为 `cancelled/true`；已结束的成功或失败任务为 `completed/false`、`failed/false`。抢先抵达的取消请求留下 tombstone，阻止随后同 ID 请求发起模型调用。ID 仅允许 8–100 个字母、数字、下划线或连字符，取消接口沿用同源及 JSON 检查。任务登记表限 2000 项、终态保留一小时，不驱逐运行中任务；防重和取消仅在当前单服务进程及保留期内有效，非分布式/持久化作业系统。
+
+服务端通过 `AbortSignal` 关闭同步 Responses 请求连接，保持原部署、`store:false` 及已有超时；不使用仅适用于 background response 的 cancel 端点。逐周/逐档/检验前后检查取消信号，取消不进入纠错重试，迟到结果不写业务数据。`aiUsage` 已开始调用记录标为 `cancelled`，已返回的 token 用量保留，未知用量不当作零账单。菜单 `menuRuns` 标为 `cancelled`，已完成检查点保留，恢复沿用原一致性核验。
+
+原 Action/JSON 请求以 HTTP 409、`code: GENERATION_CANCELLED` 结束；已打开的菜单 NDJSON 流发送同码 `error` 终态并保留安全的 `runId`/诊断。前端不主动切断接收流，只在原请求确认终止后解锁；取消失败仍显示任务进行中并允许重试。任务已经提交完成时，取消不回滚真实完成结果。断网、刷新或关闭浏览器仍不自动放弃后台任务。
+
 ## 后续迁移方式及边界
 
 1. **迁移Web/API地址**：设置公开配置`VITE_API_BASE_URL`后重新构建，所有查询、上传及下载地址一起切换。默认`/api`；优先由部署环境同源反向代理转发到后端。配置绝不能放API密钥。
@@ -109,6 +157,10 @@ Host 仅允许 loopback，以及 `lan` 模式下本机实际网卡的 RFC1918 �
 
 ## 本地数据库规整
 
-使用`PRAGMA user_version=1`记录结构版本。旧库版本0仅创建缺失集合并标记版本，不重写、删除或重新导入现有记录。遇到比应用更高的版本立即拒绝打开，不静默降级。正常重启不清库，不覆盖人工回复或审批。生产重启前对当前SQLite做一致性备份，验证迁移前后所有业务表行摘要相同。
+`tools/Import-DiningMaterials.mjs` 提供现有库的显式增量资料导入。菜品、配方和资料清单沿用现有API及数据模型；完整工作表快照保存在独立 `meta["source-sheet:<hash>"]`，清单保存在 `meta["source-materials-import"]`，不经 `/api/data` 暴露全部原始单元格。稳定快照ID取文件路径、工作表名称和源文件SHA256，不依赖可变的book编号；保留旧快照及来源版本。
+
+流程校验源压缩包/Excel和解析快照哈希、预览差异、SQLite一致性备份、事务内再次检查进行中任务及重算差异。已有菜品字段不覆盖，仅名称匹配且原英文为空时补入来源译名；配方按完整内容去重。反馈、Action、菜单、Prompt及原始排菜规则不在本流程更新范围。源规则Excel当前仍由既有规则同步逻辑读取，本次入库不声称移除了该运行时依赖。
+
+使用`PRAGMA user_version=2`记录结构版本。旧库版本0/1在事务中补建独立英文缓存表并标记版本，不重写、删除或重新导入现有记录。遇到比应用更高的版本立即拒绝打开，不静默降级。正常重启不清库，不覆盖人工回复或审批。生产重启前对当前SQLite做一致性备份；英文补全仅允许英文元数据/修订字段、独立缓存、租约、审计和AI用量变化，其余业务表和菜品字段保持不变。
 
 契约测试覆盖SQLite与独立Memory适配器、旧库无损升级、未知集合拒绝、事务回滚、页面禁止绕过业务API、可配置base URL、二进制原件上传和下载地址复用。

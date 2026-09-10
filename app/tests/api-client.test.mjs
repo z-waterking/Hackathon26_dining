@@ -10,6 +10,46 @@ function recorder(baseUrl = "/api") {
   const api = createDiningApi({ baseUrl, fetchImpl: async (url, init) => { calls.push({ url, ...init }); return Response.json({ ok: true }); } });
   return { api, calls };
 }
+
+test("catalog CRUD shares the API transport and sends revision checks as JSON", async () => {
+  const { api, calls } = recorder("/moved/api");
+  await api.catalog.create({ name: "新增菜", stall: "档口", price: 8, unit: "份" });
+  await api.catalog.update("D / 中", { name: "调整菜", expectedRevision: 1 });
+  await api.catalog.remove("D / 中", { expectedRevision: 2 });
+  await api.catalog.restore("D / 中", { expectedRevision: 3 });
+  assert.deepEqual(calls.map(({ method }) => method), ["POST", "PATCH", "DELETE", "POST"]);
+  assert.equal(calls[0].url, "/moved/api/dishes");
+  assert.equal(calls[2].url, "/moved/api/dishes/D%20%2F%20%E4%B8%AD");
+  assert.equal(calls[3].url, "/moved/api/dishes/D%20%2F%20%E4%B8%AD/restore");
+  assert.deepEqual(JSON.parse(calls[2].body), { expectedRevision: 2 });
+  assert.deepEqual(JSON.parse(calls[3].body), { expectedRevision: 3 });
+  assert.throws(() => api.catalog.remove(".."));
+  assert.throws(() => api.catalog.restore(""));
+});
+
+test("dish-name preparation is an explicit cancellable API write and summary is a read", async () => {
+  const { api, calls } = recorder("/moved/api");
+  await api.catalog.englishSummary();
+  await api.catalog.prepareEnglish({ generationId: "names-generation-1" });
+  assert.equal(calls[0].url, "/moved/api/dishes/english-summary");
+  assert.equal(calls[0].method, "GET");
+  assert.equal(calls[1].url, "/moved/api/dishes/prepare-english");
+  assert.equal(calls[1].method, "POST");
+  assert.deepEqual(JSON.parse(calls[1].body), { generationId: "names-generation-1" });
+});
+
+test("explicit generation cancellation targets exactly one ID through the common API", async () => {
+  const { api, calls } = recorder("/moved/api");
+  await api.generations.cancel("generation-1");
+  await api.actions.summarize({ generationId: "generation-2", force: true });
+  await api.plans.resume("MR-1", { generationId: "generation-3" });
+  assert.equal(calls[0].url, "/moved/api/generations/generation-1/cancel");
+  assert.equal(calls[0].method, "POST");
+  assert.deepEqual(JSON.parse(calls[0].body), {});
+  assert.deepEqual(JSON.parse(calls[1].body), { generationId: "generation-2", force: true });
+  assert.deepEqual(JSON.parse(calls[2].body), { runId: "MR-1", generationId: "generation-3" });
+  assert.throws(() => api.generations.cancel(".."));
+});
 test("one API client supplies every feature and centralizes URL, method and payload", async () => {
   const { api, calls } = recorder("https://example.test/dining/api/");
   await api.workspace.load();
@@ -81,6 +121,25 @@ test("prompt configuration uses the dedicated shared GET and PUT API", async () 
   await api.prompts.save(input);
   assert.deepEqual(calls.map(call => [call.url, call.method]), [["/moved/api/prompt-config", "GET"], ["/moved/api/prompt-config", "PUT"]]);
   assert.deepEqual(JSON.parse(calls[1].body), input);
+});
+
+test("prompt history and Base restore share the configured API transport", async () => {
+  const { api, calls } = recorder("/moved/api");
+  const lock = { version: 7, baseFingerprint: "a".repeat(64) };
+  await api.prompts.history({ page: 2, pageSize: 10 });
+  await api.prompts.historyVersion(0);
+  await api.prompts.historyVersion(7);
+  await api.prompts.restoreBase(lock);
+  assert.deepEqual(calls.map(call => [call.url, call.method]), [
+    ["/moved/api/prompt-config/history?page=2&pageSize=10", "GET"],
+    ["/moved/api/prompt-config/history/0", "GET"],
+    ["/moved/api/prompt-config/history/7", "GET"],
+    ["/moved/api/prompt-config/restore-base", "POST"],
+  ]);
+  assert.deepEqual(JSON.parse(calls[3].body), lock);
+  for (const version of [-1, 1.5, "../current", "01", "1e2", null, undefined, Number.MAX_SAFE_INTEGER + 1])
+    assert.throws(() => api.prompts.historyVersion(version), /Prompt版本无效/);
+  assert.equal(calls.length, 4);
 });
 
 test("HTTP errors retain safe generation recovery metadata but not raw AI content", async () => {

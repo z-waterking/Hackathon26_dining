@@ -7,7 +7,6 @@ import { resolve } from "node:path";
 import {
   feedbackSchema,
   feedbackUpdateSchema,
-  dishUpdateSchema,
   parseCsv,
   transactionSchema,
   dateSchema,
@@ -27,7 +26,11 @@ import { createNetworkAccess } from "./network-access.mjs";
 import { streamMenuProgress } from "./menu-progress-stream.mjs";
 import { requireStoredStallCatalog } from "./stored-stall-catalog.mjs";
 import { repairMenuConflict } from "./menu-repair.mjs";
-import { savePromptConfig } from "./prompt-config.mjs";
+import { savePromptConfig, restorePromptBase } from "./prompt-config.mjs";
+import { cachedTranslationView } from "./ui-translations.mjs";
+import { createGenerationTasks, generationRequest } from "./generation-tasks.mjs";
+import { createDish, updateDish, archiveDish, restoreDish } from "./catalog-service.mjs";
+import { prepareCatalogEnglish } from "./catalog-english.mjs";
 
 const hash = (value) => createHash("sha256").update(value).digest("hex");
 export function createApp(
@@ -46,8 +49,11 @@ export function createApp(
     requireStoredStallCatalog(store);
     await syncMenuSourceRules(store, options.menuRuleRoot);
   }
+  // Business content keeps its source language. Translation of application
+  // labels is a client concern and must not add model work to API requests.
   app.addHook("preSerialization", async (_request, _reply, payload) => publicData(payload));
   const activeTasks = new Set();
+  const generations = createGenerationTasks();
   async function exclusive(key, action) {
     if (activeTasks.has(key)) throw new Error("此任务正在进行，请等待当前请求完成");
     activeTasks.add(key);
@@ -78,6 +84,14 @@ export function createApp(
     return item;
   };
   app.get("/api/health", (_request, response) => response.send({ ok: true }));
+  // Backward-compatible cache query only. Even an old browser cannot start AI
+  // work merely by rendering text or switching language.
+  app.post("/api/ui-translations", async (request, response) => {
+    const { texts } = z.object({ texts: z.array(z.string().min(1).max(30000)).min(1).max(40) }).strict().parse(request.body);
+    if (texts.reduce((size, text) => size + text.length, 0) > 40000) throw new Error("Translation request is too large.");
+    const view = cachedTranslationView(store, texts);
+    return response.send({ translations: view.translations });
+  });
   app.get("/api/data", (_request, response) => response.send(queries.workspace()));
   for (const resource of ["feedback", "dishes", "actions", "plans", "imports"])
     app.get(`/api/${resource}`, (_request, response) => response.send(queries[resource]()));
@@ -92,6 +106,23 @@ export function createApp(
     savePromptConfig(store, request.body);
     return response.send(queries.promptConfig());
   });
+  app.get("/api/prompt-config/history", (request, response) => {
+    const query = z.object({ page: z.coerce.number().int().min(1).max(Number.MAX_SAFE_INTEGER).default(1),
+      pageSize: z.coerce.number().int().min(1).max(50).default(10) }).strict().parse(request.query);
+    return response.send(queries.promptHistory(query));
+  });
+  app.get("/api/prompt-config/history/:version", (request, response) => {
+    const version = z.string().regex(/^(0|[1-9][0-9]*)$/).transform(Number).pipe(z.number().int().min(0).max(Number.MAX_SAFE_INTEGER)).parse(request.params.version);
+    try { return response.send(queries.promptHistoryVersion(version)); }
+    catch (error) {
+      if (error.statusCode === 404) return response.status(404).send({ error: error.message });
+      throw error;
+    }
+  });
+  app.post("/api/prompt-config/restore-base", (request, response) => {
+    restorePromptBase(store, request.body);
+    return response.send(queries.promptConfig());
+  });
   app.get("/api/audit", (_request, response) => response.send(queries.audit()));
   app.get("/api/menu-runs/:id", (request, response) => response.send(queries.menuRun(request.params.id)));
   app.get("/api/menu-runs", (_request, response) => response.send(queries.menuRuns()));
@@ -101,8 +132,13 @@ export function createApp(
     return response.send(queries.actionSummary({ month: scope.month, demo: scope.demo === "true" }));
   });
   app.post("/api/actions/summarize", async (request, response) => {
-    const scope = z.object({ month: z.string().default(""), demo: z.boolean().default(false), force: z.boolean().default(false) }).strict().parse(request.body || {});
-    return response.send(await exclusive("action-summary", () => summarizeActions(store, ai, scope)));
+    const { id, input } = generationRequest(request.body);
+    const scope = z.object({ month: z.string().default(""), demo: z.boolean().default(false), force: z.boolean().default(false) }).strict().parse(input);
+    return response.send(await exclusive("action-summary", () => generations.run(id, signal => summarizeActions(store, ai, scope, { signal }))));
+  });
+  app.post("/api/generations/:id/cancel", (request, response) => {
+    z.object({}).strict().parse(request.body || {});
+    return response.send(generations.cancel(request.params.id));
   });
   app.post("/api/demo/actions", (_request, response) => response.send(ensureDemoActions(store)));
   app.get("/api/imports/:id/rows", (request, response) => response.send(queries.convertedRows(request.params.id)));
@@ -218,51 +254,65 @@ export function createApp(
     });
     response.send({ inserted, skipped: inputs.length - inserted });
   });
-  app.patch("/api/dishes/:id", (request, response) => {
-    const input = dishUpdateSchema.parse(request.body);
-    const item = {
-      ...required("dishes", request.params.id),
-      ...input,
-      verifiedAt: new Date().toISOString(),
-    };
-    store.put("dishes", item.id, item);
-    response.send(item);
+  function catalogMutation(action) {
+    // Cover the interval while rule inputs are synchronizing, before a durable
+    // menuRun exists, as well as inspection/repair of an existing menu.
+    if (activeTasks.has("menu-workflow")) throw Object.assign(new Error("菜单任务正在进行，请完成或取消后再维护菜品"), { statusCode: 409 });
+    return action();
+  }
+  app.post("/api/dishes", (request, response) => response.status(201).send(catalogMutation(() => createDish(store, request.body))));
+  app.get("/api/dishes/english-summary", (_request, response) => response.send(queries.catalogEnglish()));
+  app.post("/api/dishes/prepare-english", async (request, response) => {
+    const { id, input } = generationRequest(request.body);
+    z.object({}).strict().parse(input);
+    return response.send(await exclusive("catalog-english", () => generations.run(id, signal => prepareCatalogEnglish(store, ai, { signal }))));
   });
+  app.patch("/api/dishes/:id", (request, response) => response.send(catalogMutation(() => updateDish(store, request.params.id, request.body))));
+  // Keep the record for historical menu/source references. DELETE archives;
+  // restoration is an explicit operation and never silently happens on update.
+  app.delete("/api/dishes/:id", (request, response) => response.send(catalogMutation(() => archiveDish(store, request.params.id, request.body))));
+  app.post("/api/dishes/:id/restore", (request, response) => response.send(catalogMutation(() => restoreDish(store, request.params.id, request.body))));
   app.post("/api/plans/generate-stream", async (request, response) => {
-    if (request.body?.demo === true || request.body?.useAi !== true) throw new Error("逐周实时生成仅用于正式 AI 排菜");
-    await exclusive("menu-workflow", () => streamMenuProgress(response, async onProgress => {
+    const { id, input } = generationRequest(request.body);
+    if (input.demo === true || input.useAi !== true) throw new Error("逐周实时生成仅用于正式 AI 排菜");
+    await exclusive("menu-workflow", () => streamMenuProgress(response, onProgress => generations.run(id, async signal => {
       await syncMenuInputs();
-      return runMenuWorkflow({ store, ai, input: request.body, settings: getSettings(store), onProgress,
+      signal?.throwIfAborted();
+      return runMenuWorkflow({ store, ai, input, settings: getSettings(store), onProgress, signal,
         ruleSourcePath: options.menuRuleRoot ? resolve(options.menuRuleRoot, "餐厅排菜规则+示例.xlsx") : undefined });
-    }));
+    })));
     return response;
   });
   app.post("/api/plans/resume-stream", async (request, response) => {
-    const { runId } = z.object({ runId: z.string().min(1).max(150) }).strict().parse(request.body);
-    await exclusive("menu-workflow", () => streamMenuProgress(response, async onProgress => {
+    const { id, input } = generationRequest(request.body);
+    const { runId } = z.object({ runId: z.string().min(1).max(150) }).strict().parse(input);
+    await exclusive("menu-workflow", () => streamMenuProgress(response, onProgress => generations.run(id, async signal => {
       await syncMenuInputs();
-      return resumeMenuWorkflow({ store, ai, runId, settings: getSettings(store), onProgress,
+      signal?.throwIfAborted();
+      return resumeMenuWorkflow({ store, ai, runId, settings: getSettings(store), onProgress, signal,
         ruleSourcePath: options.menuRuleRoot ? resolve(options.menuRuleRoot, "餐厅排菜规则+示例.xlsx") : undefined });
-    }));
+    })));
     return response;
   });
   app.post("/api/plans/generate", async (request, response) => {
-    if (request.body.demo === true)
-      return response.send(await exclusive("menu-workflow", () => runDemoMenuWorkflow({ store, input: request.body, settings: getSettings(store) })));
-    if (request.body.useAi === true) {
-      const result = await exclusive("menu-workflow", async () => {
+    const { id, input } = generationRequest(request.body);
+    if (input.demo === true)
+      return response.send(await exclusive("menu-workflow", () => generations.run(id, () => runDemoMenuWorkflow({ store, input, settings: getSettings(store) }))));
+    if (input.useAi === true) {
+      const result = await exclusive("menu-workflow", () => generations.run(id, async signal => {
         await syncMenuInputs();
-        return runMenuWorkflow({ store, ai, input: request.body, settings: getSettings(store), ruleSourcePath: options.menuRuleRoot ? resolve(options.menuRuleRoot, "餐厅排菜规则+示例.xlsx") : undefined });
-      });
+        signal?.throwIfAborted();
+        return runMenuWorkflow({ store, ai, input, settings: getSettings(store), signal, ruleSourcePath: options.menuRuleRoot ? resolve(options.menuRuleRoot, "餐厅排菜规则+示例.xlsx") : undefined });
+      }));
       return response.send(result);
     }
     const dishes = store.all("dishes");
-    const plan = generateMenu(dishes, request.body);
+    const plan = await generations.run(id, () => generateMenu(dishes, input));
     const previous = store
       .all("plans")
       .filter((item) => item.stall === plan.stall)
       .at(-1);
-    response.send({
+    return response.send({
       ...plan,
       validation: validateMenu(plan, dishes, previous),
     });
@@ -297,12 +347,14 @@ export function createApp(
     return repairMenuConflict({ store, ai, input: request.body, settings: getSettings(store) });
   })));
   app.post("/api/plans/resume", async (request, response) => {
-    const { runId } = z.object({ runId: z.string().min(1).max(150) }).strict().parse(request.body);
-    return response.send(await exclusive("menu-workflow", async () => {
+    const { id, input } = generationRequest(request.body);
+    const { runId } = z.object({ runId: z.string().min(1).max(150) }).strict().parse(input);
+    return response.send(await exclusive("menu-workflow", () => generations.run(id, async signal => {
       await syncMenuInputs();
-      return resumeMenuWorkflow({ store, ai, runId, settings: getSettings(store),
+      signal?.throwIfAborted();
+      return resumeMenuWorkflow({ store, ai, runId, settings: getSettings(store), signal,
         ruleSourcePath: options.menuRuleRoot ? resolve(options.menuRuleRoot, "餐厅排菜规则+示例.xlsx") : undefined });
-    }));
+    })));
   });
   app.post("/api/plans/check", (request, response) =>
     response.send(checkedPlan(request.body)),
@@ -390,7 +442,10 @@ export function createApp(
         : error.message;
     response
       .status([409, 413, 502, 503].includes(error.statusCode) ? error.statusCode : 400)
-      .send({ error: message || "请求失败", ...(error.runId ? { runId: error.runId, ...error.diagnostics } : {}) });
+      .send({ error: message || "请求失败", ...(error.runId ? { runId: error.runId, ...error.diagnostics } : {}),
+        ...(["GENERATION_CANCELLED", "GENERATION_ALREADY_EXISTS", "CATALOG_INVALID_INPUT", "CATALOG_NOT_FOUND",
+          "CATALOG_REVISION_CONFLICT", "CATALOG_REVISION_INVALID", "CATALOG_DUPLICATE", "CATALOG_ARCHIVED", "CATALOG_GENERATION_RUNNING",
+          "CATALOG_ENGLISH_RUNNING", "CATALOG_ENGLISH_LEASE_LOST", "CATALOG_ENGLISH_INVALID_OUTPUT"].includes(error.code) ? { code: error.code } : {}) });
   });
   return app;
 }

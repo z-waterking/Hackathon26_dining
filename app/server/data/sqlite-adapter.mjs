@@ -3,7 +3,7 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { COLLECTIONS, collectionName } from "./repository.mjs";
 
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 export function createSqliteAdapter(filename) {
   if (filename !== ":memory:") mkdirSync(dirname(filename), { recursive: true });
   const db = new DatabaseSync(filename);
@@ -11,7 +11,8 @@ export function createSqliteAdapter(filename) {
     const version = db.prepare("PRAGMA user_version").get().user_version;
     if (version > SCHEMA_VERSION) throw new Error("数据库版本高于当前应用版本，请升级应用；原数据未修改");
     db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;");
-    // Version 0 is the original DB: mark schema without rewriting any rows.
+    // v2 adds the dedicated catalog-English cache. Existing rows are never
+    // rewritten/reseeded; the transactional migration also works from v0.
     db.exec("BEGIN IMMEDIATE");
     try {
       for (const collection of COLLECTIONS)

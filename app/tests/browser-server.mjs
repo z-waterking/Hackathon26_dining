@@ -4,6 +4,7 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 import { createStore } from "../server/store.mjs";
 import { readMaterials } from "../server/importer.mjs";
 import { createApp } from "../server/app.mjs";
+import { initializePromptBase } from "../server/prompt-config.mjs";
 
 export default async function setupBrowserServer() {
   const temporaryRoot = resolve(tmpdir());
@@ -38,6 +39,7 @@ export default async function setupBrowserServer() {
     store = createStore(resolve(temporary, "test.sqlite"), () =>
       readMaterials(resolve(import.meta.dirname, "../../materials/inspection")),
     );
+    initializePromptBase(store);
     app = createApp(store, resolve(import.meta.dirname, "../dist"), { root: temporary });
     await app.listen({ port: 4499, host: "127.0.0.1" });
     return cleanup;

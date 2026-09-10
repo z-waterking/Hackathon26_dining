@@ -7,6 +7,7 @@ import { syncMenuSourceRules } from "./menu-source-rules.mjs";
 import { createNetworkAccess } from "./network-access.mjs";
 import { createAiClient } from "./ai.mjs";
 import { requireStoredStallCatalog } from "./stored-stall-catalog.mjs";
+import { initializePromptBase } from "./prompt-config.mjs";
 
 const root = resolve(import.meta.dirname, "..");
 if (existsSync(resolve(root, ".env"))) loadEnvFile(resolve(root, ".env"));
@@ -14,6 +15,9 @@ const networkAccess = createNetworkAccess({ mode: process.env.DINING_NETWORK || 
 const store = await initializeLocalStore();
 requireStoredStallCatalog(store);
 await syncMenuSourceRules(store, resolve(root, ".."));
+// Freeze source/default configuration once, independently of saved overrides.
+// Reads and previews never create versions or mutate the baseline.
+initializePromptBase(store);
 const app = createApp(store, undefined, { menuRuleRoot: resolve(root, ".."), networkAccess });
 const port = Number(process.env.PORT || 4317);
 try {

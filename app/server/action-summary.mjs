@@ -125,7 +125,8 @@ function validateProposals(result, source, existingActions) {
   }
 }
 
-export async function summarizeActions(store, ai, rawOptions = {}) {
+export async function summarizeActions(store, ai, rawOptions = {}, { signal } = {}) {
+  signal?.throwIfAborted();
   const { force, ...options } = requestSchema.parse(rawOptions);
   const initial = getActionSummary(store, options);
   if (!initial.sourceCount || (!force && initial.analysis)) return { ...initial, reused: true };
@@ -141,8 +142,9 @@ export async function summarizeActions(store, ai, rawOptions = {}) {
   const startingInput = hash(existingActions);
   const response = await ai.respond({
     role: "actions", prompt: actualPrompt,
-    input, schema: z.toJSONSchema(responseSchema), maxOutputTokens: 6000,
+    input, schema: z.toJSONSchema(responseSchema), maxOutputTokens: 6000, signal,
   });
+  signal?.throwIfAborted();
   const result = responseSchema.parse(response.data);
   result.actions = result.actions.map(({ evidenceIds, ...action }) => ({ ...action, evidence: evidenceIds.map((id) => {
     const item = catalog.evidence.get(id);
@@ -153,6 +155,7 @@ export async function summarizeActions(store, ai, rawOptions = {}) {
   const at = new Date().toISOString();
   const analysisId = `AS-${randomUUID()}`;
   store.atomic(() => {
+    signal?.throwIfAborted();
     if (snapshot(store, options).sourceFingerprint !== source.sourceFingerprint || getSettings(store).version !== settings.version || hash(existingInput(store, options.demo)) !== startingInput)
       throw new Error("汇总期间反馈、菜单档口、已有事项或内部配置已更新，请重新汇总；未写入过时结果");
     const metaKey = `action-summary:${scopeName(options)}`;

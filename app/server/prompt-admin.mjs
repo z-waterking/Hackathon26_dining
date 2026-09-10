@@ -1,4 +1,4 @@
-import { getPromptConfig } from "./prompt-config.mjs";
+import { getPromptConfig, promptBaseSummary } from "./prompt-config.mjs";
 import { defaultSettings } from "./settings.mjs";
 import { approvedMenuActions, sourceRules } from "./menu-workflow.mjs";
 import { directPrompt, directContext } from "./direct-menu-planner.mjs";
@@ -18,7 +18,7 @@ export function promptAdminView(store) {
     actions, dishes: store.all("dishes"), stallCatalog: catalog,
     fixedDishes: store.get("meta", "menu-fixed-dishes") || [] };
   const context = directContext(snapshots, { count: 4 });
-  return { ...config, approvedActions: actions, localConstraintsText: LOCAL_CONSTRAINTS_TEXT,
+  return { ...config, base: promptBaseSummary(store, config), approvedActions: actions, localConstraintsText: LOCAL_CONSTRAINTS_TEXT,
     previews: {
       actionGeneration: responseInstructions(actionGenerationPrompt(config, settings)),
       menuSystem: responseInstructions(directPrompt(snapshots)),

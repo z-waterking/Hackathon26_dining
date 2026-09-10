@@ -40,13 +40,13 @@ function parseFeedbackDate(value) {
   return { month: `${match[1]}-${match[2]}`, day, lastDay };
 }
 
-export function buildFeedbackTrend(records, month = "") {
+export function buildFeedbackTrend(records, month = "", t = (text) => text) {
   const scope = month ? records.filter((record) => record.date?.startsWith(month)) : records;
   const types = buildFeedbackDistribution(scope);
   const parsed = scope.map((record) => ({ record, date: parseFeedbackDate(record.date) }));
   const monthDate = month ? parseFeedbackDate(month) : null;
   const keys = monthDate
-    ? Array.from({ length: Math.ceil(monthDate.lastDay / 7) }, (_, index) => ({ key: String(index), label: index * 7 + 1 === monthDate.lastDay ? `${monthDate.lastDay}日` : `${index * 7 + 1}–${Math.min(monthDate.lastDay, index * 7 + 7)}日` }))
+    ? Array.from({ length: Math.ceil(monthDate.lastDay / 7) }, (_, index) => ({ key: String(index), label: index * 7 + 1 === monthDate.lastDay ? t(`${monthDate.lastDay}日`, `Day ${monthDate.lastDay}`) : t(`${index * 7 + 1}–${Math.min(monthDate.lastDay, index * 7 + 7)}日`, `Days ${index * 7 + 1}–${Math.min(monthDate.lastDay, index * 7 + 7)}`) }))
     : [...new Set(parsed.filter((item) => item.date).map((item) => item.date.month))].sort().map((key) => ({ key, label: key }));
   const buckets = keys.map((key) => ({ ...key, total: 0, counts: Object.fromEntries(types.map((type) => [type.name, 0])) }));
   const byKey = new Map(buckets.map((bucket) => [bucket.key, bucket]));

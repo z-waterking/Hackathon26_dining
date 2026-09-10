@@ -4,6 +4,8 @@ import { z } from "zod";
 import { audit, defaultSettings } from "./settings.mjs";
 
 const CURRENT_KEY = "prompt-config:current";
+const BASE_KEY = "prompt-config:base";
+const PROMPT_KEYS = Object.freeze(["actionGenerationText", "menuSystemText", "approvedActionText"]);
 const hash = (value) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const operatorSource = () => ({ kind: "operator", label: "运营规则" });
 
@@ -172,6 +174,135 @@ function requestError(message, statusCode = 400) {
   return Object.assign(new Error(message), { statusCode });
 }
 
+const versionSchema = z.union([z.number(), z.string().regex(/^\d+$/).transform(Number)])
+  .pipe(z.number().int().min(0).max(Number.MAX_SAFE_INTEGER));
+const historyQuerySchema = z.object({
+  page: versionSchema.pipe(z.number().min(1)).default(1),
+  pageSize: versionSchema.pipe(z.number().min(1).max(50)).default(10),
+}).strict();
+const restoreSchema = promptConfigSchema.pick({ version: true, baseFingerprint: true });
+
+function textsOf(config) {
+  return Object.fromEntries(PROMPT_KEYS.map(key => [key, config[key]]));
+}
+
+function configurationFingerprint(config) {
+  return hash({ ...textsOf(config), rules: config.rules.map(editableRule) });
+}
+
+function ensurePromptBase(store) {
+  const existing = store.get("meta", BASE_KEY);
+  if (existing) return existing;
+  const capturedAt = new Date().toISOString();
+  // This baseline must never inherit current operator overrides. It freezes
+  // the source rules and legacy/default prompt inputs at first initialization.
+  const base = { version: 0, updatedAt: capturedAt, capturedAt, operation: "base", origin: "source-defaults",
+    previousVersion: null, ...defaultTexts(store), rules: sourceRules(store) };
+  base.fingerprint = configurationFingerprint(base);
+  store.put("meta", BASE_KEY, base);
+  return base;
+}
+
+export function initializePromptBase(store) {
+  return store.atomic(() => ensurePromptBase(store));
+}
+
+export function promptBaseSummary(store, current = getPromptConfig(store)) {
+  const base = store.get("meta", BASE_KEY);
+  if (!base) return null;
+  return { version: 0, capturedAt: base.capturedAt, fingerprint: base.fingerprint, origin: base.origin,
+    isCurrent: base.fingerprint === configurationFingerprint(current) };
+}
+
+function changeSummary(previous, config) {
+  return { previousVersion: previous.version, changedPrompts: PROMPT_KEYS.filter(key => previous[key] !== config[key]),
+    rulesChanged: hash(previous.rules.map(editableRule)) !== hash(config.rules.map(editableRule)),
+    ruleCount: config.rules.length, enabledRuleCount: config.rules.filter(rule => rule.enabled).length };
+}
+
+function persistVersion(store, previous, texts, rules, operation, fingerprint) {
+  const version = previous.version + 1;
+  if (!Number.isSafeInteger(version) || store.get("meta", `prompt-config:version-${version}`))
+    throw requestError("Prompt 历史版本已存在或版本号无效，请刷新后重试；未覆盖历史", 409);
+  const summary = changeSummary(previous, { ...texts, rules });
+  const config = { version, updatedAt: new Date().toISOString(), operation, ...texts, rules, ...summary,
+    sourceFingerprint: fingerprint, sourceRulesFingerprint: sourceFingerprint(store) };
+  config.fingerprint = configurationFingerprint(config);
+  store.put("meta", CURRENT_KEY, config);
+  store.put("meta", `prompt-config:version-${version}`, config);
+  audit(store, operation === "restore-base" ? "prompt.config.restored" : "prompt.config.updated", String(version),
+    { operation, ...summary, sourceChanged: previous.sourceChanged, fingerprint: config.fingerprint });
+  return getPromptConfig(store);
+}
+
+function safeHistoryRule(rule) {
+  const allowedSourceFields = ["file", "sheet", "row", "cell", "fileSha256", "kind", "label"];
+  const source = rule.source && typeof rule.source === "object"
+    ? Object.fromEntries(allowedSourceFields.filter(key => key === "row" ? Number.isSafeInteger(rule.source[key]) : typeof rule.source[key] === "string").map(key => [key, rule.source[key]])) : null;
+  return { id: rule.id, stall: rule.stall, text: rule.text, enabled: rule.enabled !== false, source,
+    ...(typeof rule.meal === "string" ? { meal: rule.meal } : {}) };
+}
+
+function historicalRecord(store, version) {
+  return store.get("meta", version === 0 ? BASE_KEY : `prompt-config:version-${version}`);
+}
+
+function historicalSummary(store, record) {
+  const previousVersion = record.version === 0 ? null : Number.isSafeInteger(record.previousVersion) ? record.previousVersion : record.version - 1;
+  const prior = previousVersion === null ? null : historicalRecord(store, previousVersion);
+  const storedSummary = Array.isArray(record.changedPrompts) && typeof record.rulesChanged === "boolean";
+  const legacyAudit = !storedSummary && record.version > 0 && store.all("audit").find(event =>
+    ["prompt.config.updated", "prompt.config.restored"].includes(event.kind) && event.targetId === String(record.version) &&
+    Array.isArray(event.changedPrompts) && typeof event.rulesChanged === "boolean");
+  // Never compare historical rules with today's source rules or live Actions.
+  // Legacy versions can be compared to a prior immutable record when present.
+  // A newly captured source baseline is not proof of a legacy version's
+  // original predecessor. Infer only between pre-existing numbered versions.
+  const inferred = legacyAudit || prior && previousVersion !== 0 && changeSummary(prior, record);
+  return { version: record.version, updatedAt: record.updatedAt || record.capturedAt || null,
+    operation: record.version === 0 ? "base" : ["confirm", "restore-base"].includes(record.operation) ? record.operation : "legacy",
+    previousVersion, changedPrompts: (storedSummary ? record.changedPrompts : inferred?.changedPrompts || []).filter(key => PROMPT_KEYS.includes(key)),
+    rulesChanged: storedSummary ? record.rulesChanged : inferred?.rulesChanged || false,
+    ruleCount: record.rules.length, enabledRuleCount: record.rules.filter(rule => rule.enabled !== false).length,
+    fingerprint: typeof record.fingerprint === "string" && /^[a-f0-9]{64}$/.test(record.fingerprint) ? record.fingerprint : configurationFingerprint(record),
+    summaryAvailable: record.version === 0 || storedSummary || Boolean(inferred) };
+}
+
+export function promptHistory(store, query = {}) {
+  const { page, pageSize } = historyQuerySchema.parse(query);
+  const versions = new Set(store.all("meta").filter(record => record && Number.isSafeInteger(record.version) && record.version > 0 &&
+    PROMPT_KEYS.every(key => typeof record[key] === "string") && Array.isArray(record.rules)).map(record => record.version));
+  const records = [...versions].map(version => historicalRecord(store, version)).filter(Boolean);
+  const base = historicalRecord(store, 0);
+  if (base) records.push(base);
+  records.sort((left, right) => right.version - left.version);
+  const start = (page - 1) * pageSize;
+  return { items: records.slice(start, start + pageSize).map(record => historicalSummary(store, record)), total: records.length, page, pageSize };
+}
+
+export function promptHistoryVersion(store, inputVersion) {
+  const version = versionSchema.parse(inputVersion);
+  const record = historicalRecord(store, version);
+  if (!record) throw requestError("找不到该 Prompt 历史版本", 404);
+  return { ...historicalSummary(store, record), ...textsOf(record), rules: record.rules.map(safeHistoryRule),
+    ...(version === 0 ? { capturedAt: record.capturedAt, origin: record.origin } : {}) };
+}
+
+export function restorePromptBase(store, input) {
+  const values = restoreSchema.parse(input);
+  return store.atomic(() => {
+    const previous = getPromptConfig(store);
+    if (values.version !== previous.version || values.baseFingerprint !== previous.baseFingerprint)
+      throw requestError("Prompt 配置或来源规则已更新，请刷新后重新确认恢复；未覆盖最新内容", 409);
+    const base = ensurePromptBase(store);
+    // An empty/malformed source snapshot may be captured for traceability, but
+    // it must not replace an executable current configuration.
+    promptConfigSchema.parse({ ...values, ...textsOf(base), rules: base.rules });
+    if (!previous.sourceChanged && configurationFingerprint(previous) === base.fingerprint) return previous;
+    return persistVersion(store, previous, textsOf(base), base.rules.map(editableRule), "restore-base", values.baseFingerprint);
+  });
+}
+
 function normalizeRules(incoming, previous) {
   const existing = new Map(previous.map((rule) => [rule.id, rule]));
   const ids = new Set();
@@ -203,13 +334,7 @@ export function savePromptConfig(store, input) {
     const texts = { actionGenerationText: values.actionGenerationText, menuSystemText: values.menuSystemText, approvedActionText: values.approvedActionText };
     const rulesChanged = hash(rules) !== hash(previous.rules.map(editableRule));
     if (!previous.sourceChanged && Object.entries(texts).every(([key, value]) => previous[key] === value) && !rulesChanged) return previous;
-    const config = { version: previous.version + 1, updatedAt: new Date().toISOString(), ...texts, rules,
-      sourceFingerprint: values.baseFingerprint, sourceRulesFingerprint: sourceFingerprint(store) };
-    store.put("meta", CURRENT_KEY, config);
-    store.put("meta", `prompt-config:version-${config.version}`, config);
-    audit(store, "prompt.config.updated", String(config.version), { previousVersion: previous.version,
-      changedPrompts: Object.keys(texts).filter((key) => previous[key] !== texts[key]),
-      rulesChanged, sourceChanged: previous.sourceChanged, ruleCount: rules.length, enabledRuleCount: rules.filter((rule) => rule.enabled).length });
-    return getPromptConfig(store);
+    ensurePromptBase(store);
+    return persistVersion(store, previous, texts, rules, "confirm", values.baseFingerprint);
   });
 }

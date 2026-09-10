@@ -9,6 +9,8 @@ import { aggregateTransactions, demoTransactions } from "../domain.mjs";
 import { existsSync } from "node:fs";
 import { resolve, relative, isAbsolute, basename } from "node:path";
 import { promptAdminView } from "../prompt-admin.mjs";
+import { promptHistory, promptHistoryVersion } from "../prompt-config.mjs";
+import { englishNameSummary } from "../catalog-english.mjs";
 
 // Public read models live here, independent of Fastify handlers. Both the
 // workspace snapshot and resource endpoints share the same projections.
@@ -20,6 +22,7 @@ export function createQueryService(repository, { ai, root } = {}) {
   };
   const queries = {
     dishes: () => publicData(repository.all("dishes")),
+    catalogEnglish: () => publicData(englishNameSummary(repository)),
     feedback: () => publicData(repository.all("feedback")),
     actions: () => publicData(repository.all("actions")),
     plans: () => publicData(repository.all("plans").map(({ entries = [], ...plan }) => ({ ...plan, countEntries: entries.length }))),
@@ -28,6 +31,8 @@ export function createQueryService(repository, { ai, root } = {}) {
     audit: () => publicData(repository.all("audit").slice(-100).reverse()),
     aiStatus: () => publicData(ai.status()),
     promptConfig: () => promptAdminView(repository),
+    promptHistory: (query) => promptHistory(repository, query),
+    promptHistoryVersion: (version) => promptHistoryVersion(repository, version),
     menuRun: (id) => publicMenuRun(required("menuRuns", id)),
     menuRuns: () => publicData(menuRecoveryRecords(repository, getSettings(repository))),
     menuRunResult: (id) => publicData(completedMenuResult(repository, id, getSettings(repository))),
@@ -46,7 +51,10 @@ export function createQueryService(repository, { ai, root } = {}) {
     },
     recipes: (id) => {
       const dish = required("dishes", id);
-      return publicData((repository.get("meta", "recipes") || []).filter((recipe) => recipe.name.replace(/\s/g, "") === dish.name.replace(/\s/g, "")));
+      // A display-name correction must not detach imported recipe evidence or
+      // attach the recipe of an unrelated newly named dish.
+      const sourceName = dish.sourceName || dish.name;
+      return publicData((repository.get("meta", "recipes") || []).filter((recipe) => recipe.name.replace(/\s/g, "") === sourceName.replace(/\s/g, "")));
     },
     plan: (id) => {
       const item = required("plans", id);

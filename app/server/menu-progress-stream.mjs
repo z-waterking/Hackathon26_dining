@@ -12,7 +12,8 @@ export async function streamMenuProgress(reply, generate, { drainTimeoutMs = 300
   const detach = () => { detached = true; clearInterval(heartbeat); };
   reply.raw.once("close", detach);
   stream.on("error", detach);
-  async function emit(event) {
+  async function emit(event, { signal } = {}) {
+    signal?.throwIfAborted();
     if (event.runId) runId = event.runId;
     if (detached) return;
     if (!opened) {
@@ -29,13 +30,23 @@ export async function streamMenuProgress(reply, generate, { drainTimeoutMs = 300
     }
     if (stream.destroyed) return;
     const ready = stream.write(JSON.stringify(publicData(event)) + "\n");
-    if (!ready) await new Promise(resolve => {
-      // A connected browser/proxy that stops reading must not indefinitely
-      // block later AI weeks or hold the workflow's exclusive lock.
-      const timeout = setTimeout(() => { detach(); stream.destroy(); reply.raw.destroy(); done(); }, drainTimeoutMs);
-      const done = () => { clearTimeout(timeout); stream.off("drain", done); stream.off("close", done); reply.raw.off("close", done); resolve(); };
-      stream.once("drain", done); stream.once("close", done); reply.raw.once("close", done);
-    });
+    if (!ready) {
+      const drained = new Promise(resolve => {
+        // A connected browser/proxy that stops reading must not indefinitely
+        // block later AI weeks or hold the workflow's exclusive lock.
+        const timeout = setTimeout(() => { detach(); stream.destroy(); reply.raw.destroy(); done(); }, drainTimeoutMs);
+        timeout.unref();
+        const done = () => { clearTimeout(timeout); stream.off("drain", done); stream.off("close", done); reply.raw.off("close", done); signal?.removeEventListener("abort", done); resolve(); };
+        stream.once("drain", done); stream.once("close", done); reply.raw.once("close", done);
+        signal?.addEventListener("abort", done, { once: true });
+        if (signal?.aborted) done();
+      });
+      // The cancellation frame is terminal: queue it for the reader, but do
+      // not hold the generation lock waiting for a slow browser to drain it.
+      // The bounded drain cleanup above remains active after the lock releases.
+      if (event.type !== "error" || event.code !== "GENERATION_CANCELLED") await drained;
+    }
+    signal?.throwIfAborted();
     await new Promise(resolve => setImmediate(resolve));
   }
   try {
@@ -46,6 +57,7 @@ export async function streamMenuProgress(reply, generate, { drainTimeoutMs = 300
     await emit({ type: "error", error: error.message || "菜单生成失败，请查看恢复记录", runId: error.runId || runId,
       ...Object.fromEntries(["code", "week", "stall", "day", "meal", "slot"].filter(key =>
         ["string", "number"].includes(typeof error.diagnostics?.[key])).map(key => [key, error.diagnostics[key]])),
+      ...(error.code === "GENERATION_CANCELLED" ? { code: error.code } : {}),
     });
   } finally {
     clearInterval(heartbeat);

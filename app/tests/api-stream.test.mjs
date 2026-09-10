@@ -4,6 +4,18 @@ import { createDiningApi } from "../src/api/dining.js";
 import { ApiError, createHttpClient } from "../src/api/http.js";
 
 const encoder = new TextEncoder();
+test("progressive resume places cancellation identity in the body and propagates cancellation code", async () => {
+  const calls = [];
+  const api = createDiningApi({ fetchImpl: async (url, init) => {
+    calls.push({ url, ...init });
+    return streamResponse([eventsText([{ type: "started", runId: "MR-cancel" },
+      { type: "error", runId: "MR-cancel", code: "GENERATION_CANCELLED", error: "生成已取消" }])]);
+  } });
+  await assert.rejects(api.plans.resumeProgressive("MR-cancel", { generationId: "generation-cancel" }), error =>
+    error.code === "GENERATION_CANCELLED" && error.runId === "MR-cancel");
+  assert.deepEqual(JSON.parse(calls[0].body), { runId: "MR-cancel", generationId: "generation-cancel" });
+  assert.equal(calls[0].generationId, undefined);
+});
 const eventsText = (events, newline = true) => events.map((event) => JSON.stringify(event)).join("\n") + (newline ? "\n" : "");
 function streamResponse(chunks, { close = true, onCancel = () => {} } = {}) {
   return new Response(new ReadableStream({

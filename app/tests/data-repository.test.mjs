@@ -123,7 +123,8 @@ test("schema migration opens legacy SQLite without reseeding or rewriting any bu
     assert.equal(repo.get("feedback", "F-old").reply, "人工回复保留");
     repo.close();
     db = new DatabaseSync(filename);
-    assert.equal(db.prepare("PRAGMA user_version").get().user_version, 1);
+    assert.equal(db.prepare("PRAGMA user_version").get().user_version, 2);
+    assert.equal(db.prepare("SELECT count(*) AS count FROM catalogEnglish").get().count, 0);
     assert.equal(db.prepare("SELECT data FROM feedback WHERE id = ?").get("F-old").data, original);
     db.exec("PRAGMA user_version = 999"); db.close();
     assert.throws(() => createStore(filename, seed), /版本高于/);
@@ -133,6 +134,31 @@ test("SQL implementation is isolated from application and domain services", () =
   const root = resolve(import.meta.dirname, "../server");
   for (const name of readdirSync(root).filter((file) => file.endsWith(".mjs")))
     assert.doesNotMatch(readFileSync(resolve(root, name), "utf8"), /node:sqlite|new DatabaseSync|\.prepare\(/, name);
+});
+
+test("v1 catalog migrates to v2 without losing original names and persists English cache across reopen", () => {
+  const dir = mkdtempSync(resolve(tmpdir(), "dining-english-migration-"));
+  const filename = resolve(dir, "version-one.sqlite");
+  const source = JSON.stringify({ id: "D-v1", name: "原中文菜名", english: "Existing English", sources: [{ file: "original.xlsx" }], revision: 3 });
+  let db = new DatabaseSync(filename);
+  db.exec("CREATE TABLE dishes (id TEXT PRIMARY KEY,data TEXT NOT NULL); CREATE TABLE meta (id TEXT PRIMARY KEY,data TEXT NOT NULL); PRAGMA user_version=1");
+  db.prepare("INSERT INTO dishes VALUES (?, ?)").run("D-v1", source);
+  db.prepare("INSERT INTO meta VALUES (?, ?)").run("initialized", JSON.stringify({ version: 1 }));
+  db.close();
+  try {
+    let repo = createStore(filename, () => { throw new Error("Do not reseed a v1 database"); });
+    assert.deepEqual(repo.get("dishes", "D-v1"), JSON.parse(source));
+    const cache = { id: "exact-name-key", sourceName: "原中文菜名", english: "Existing English", origin: "source", protocolVersion: "dish-english-v1" };
+    repo.put("catalogEnglish", cache.id, cache);
+    repo.close();
+    repo = createStore(filename);
+    assert.deepEqual(repo.get("catalogEnglish", cache.id), cache);
+    repo.close();
+    db = new DatabaseSync(filename, { readOnly: true });
+    assert.equal(db.prepare("PRAGMA user_version").get().user_version, 2);
+    assert.equal(db.prepare("SELECT data FROM dishes WHERE id=?").get("D-v1").data, source);
+    db.close();
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test("menu recovery GET routes delegate public projections to the query service", () => {

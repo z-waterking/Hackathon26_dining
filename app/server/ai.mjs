@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { responseInstructions } from "./prompt-builders.mjs";
+import { cancellationError } from "./generation-tasks.mjs";
 
 export const defaultEndpoint = "https://41626-me2j04fd-eastus2.services.ai.azure.com/openai/v1/responses";
 
@@ -32,7 +33,8 @@ export function createAiClient(store, { config = aiConfig(), fetchImpl = fetch }
       reason: config.apiKey ? "" : "请在 app/.env 配置 Azure API 密钥后重启服务",
     };
   };
-  async function respond({ role, prompt, input, schema, maxOutputTokens }) {
+  async function respond({ role, prompt, input, schema, maxOutputTokens, signal }) {
+    if (signal?.aborted) throw cancellationError();
     if (!status().configured) throw new Error(status().reason);
     const url = new URL(config.endpoint);
     if (url.protocol !== "https:" || !/\.(services\.ai\.azure\.com|openai\.azure\.com)$/.test(url.hostname) || !url.pathname.endsWith("/openai/v1/responses"))
@@ -48,7 +50,9 @@ export function createAiClient(store, { config = aiConfig(), fetchImpl = fetch }
       const response = await fetchImpl(config.endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json", "api-key": config.apiKey },
-        signal: AbortSignal.timeout(config.timeoutMs),
+        // Synchronous Responses requests are cancelled by closing the upstream
+        // connection; background-response cancellation endpoints do not apply.
+        signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(config.timeoutMs)]) : AbortSignal.timeout(config.timeoutMs),
         body: JSON.stringify({
           model: config.model, store: false,
           instructions: responseInstructions(prompt),
@@ -80,6 +84,9 @@ export function createAiClient(store, { config = aiConfig(), fetchImpl = fetch }
       record.requestId = payload.id || response.headers.get("x-request-id") || "";
       record.estimatedCostUsd = config.inputPrice !== null && config.outputPrice !== null
         ? (record.inputTokens * config.inputPrice + record.outputTokens * config.outputPrice) / 1000000 : null;
+      // Some transports/mocks can finish after abort. Keep reported usage, but
+      // never return that late output to the business workflow.
+      if (signal?.aborted) throw cancellationError();
       if (payload.status && payload.status !== "completed") {
         const reason = payload.incomplete_details?.reason;
         if (["max_output_tokens", "content_filter"].includes(reason)) record.errorCode = reason;
@@ -93,6 +100,11 @@ export function createAiClient(store, { config = aiConfig(), fetchImpl = fetch }
       store.put("aiUsage", id, { ...record, status: "completed", completedAt: new Date().toISOString() });
       return { data, usage, model: payload.model || config.model, requestId: record.requestId };
     } catch (error) {
+      if (signal?.aborted || error.code === "GENERATION_CANCELLED") {
+        const cancelled = cancellationError();
+        store.put("aiUsage", id, { ...record, status: "cancelled", errorCode: cancelled.code, error: cancelled.message, completedAt: new Date().toISOString() });
+        throw cancelled;
+      }
       const networkCode = error.cause?.code;
       if (typeof networkCode === "string" && /^[A-Z0-9_]{1,80}$/.test(networkCode)) record.errorCode = networkCode;
       const message = ["EACCES", "EPERM"].includes(networkCode)
