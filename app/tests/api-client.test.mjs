@@ -46,6 +46,59 @@ test("original file upload uses the same base and preserves bytes with safe meta
   assert.throws(() => api.feedback.importOriginal({ name: "large.xlsx", size: 10 * 1024 * 1024 + 1 }), /10 MB/);
   assert.equal(calls.length, 1);
 });
+
+test("menu recovery uses the central API with encoded IDs and explicit resume writes", async () => {
+  const { api, calls } = recorder("/moved/api");
+  await api.plans.recoverableRuns();
+  await api.plans.resume("MR / 中");
+  await api.plans.result("MR / 中");
+  assert.equal(calls[0].url, "/moved/api/menu-runs?recoverable=true");
+  assert.equal(calls[0].method, "GET");
+  assert.equal(calls[1].url, "/moved/api/plans/resume");
+  assert.equal(calls[1].method, "POST");
+  assert.deepEqual(JSON.parse(calls[1].body), { runId: "MR / 中" });
+  assert.equal(calls[2].url, "/moved/api/menu-runs/MR%20%2F%20%E4%B8%AD/result");
+  assert.equal(calls[2].method, "GET");
+  assert.throws(() => api.plans.resume(".."));
+  assert.throws(() => api.plans.result(""));
+});
+
+test("menu conflict repair uses the shared API and preserves the exact draft and issue", async () => {
+  const { api, calls } = recorder("/moved/api");
+  const input = { plan: { scope: "all", entries: [], workflow: { runId: "MR-REPAIR" } },
+    issue: { code: "DUPLICATE", stall: "南粉北面", date: "2026-09-07", meal: "午餐", text: "同餐重复" } };
+  await api.plans.repair(input);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, "/moved/api/plans/repair");
+  assert.equal(calls[0].method, "POST");
+  assert.deepEqual(JSON.parse(calls[0].body), input);
+});
+
+test("prompt configuration uses the dedicated shared GET and PUT API", async () => {
+  const { api, calls } = recorder("/moved/api");
+  const input = { version: 1, baseFingerprint: "a".repeat(64), actionGenerationText: "反馈规则", menuSystemText: "排菜规则", approvedActionText: "Action要求", rules: [] };
+  await api.prompts.get();
+  await api.prompts.save(input);
+  assert.deepEqual(calls.map(call => [call.url, call.method]), [["/moved/api/prompt-config", "GET"], ["/moved/api/prompt-config", "PUT"]]);
+  assert.deepEqual(JSON.parse(calls[1].body), input);
+});
+
+test("HTTP errors retain safe generation recovery metadata but not raw AI content", async () => {
+  for (const wrapped of [false, true]) {
+    const details = { message: "第 3 周生成未完成", code: "MENU_SLOT_INVALID", runId: "MR-RECOVER", week: 3, stall: "寻味列车", day: 2, meal: "午餐", slot: 0,
+      plannerPrompt: "private system prompt", plannerAttempts: [{ output: "private model output" }] };
+    const body = wrapped ? { error: details } : { ...details, error: details.message };
+    const http = createHttpClient({ fetchImpl: async () => Response.json(body, { status: 502 }) });
+    await assert.rejects(http.send("/plans/generate"), (error) => {
+      assert.equal(error.message, details.message);
+      assert.equal(error.status, 502);
+      for (const key of ["code", "runId", "week", "stall", "day", "meal", "slot"]) assert.equal(error[key], details[key]);
+      assert.equal(error.plannerPrompt, undefined);
+      assert.equal(error.plannerAttempts, undefined);
+      return true;
+    });
+  }
+});
 test("API transport normalizes JSON, proxy, network and empty responses without automatic writes/retries", async () => {
   const response = (reply) => createHttpClient({ fetchImpl: async () => reply });
   await assert.rejects(response(Response.json({ error: "输入不完整" }, { status: 400 })).send("/feedback"), (e) => e instanceof ApiError && e.status === 400 && e.message === "输入不完整");

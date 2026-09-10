@@ -23,7 +23,12 @@ function proposal(extra = {}) {
     feedbackIds: ["F1", "F2", "F3"], evidence: [{ feedbackId: "F1", quote: "增加素食选择" }, { feedbackId: "F2", quote: "蔬菜品种太少" }], ...extra };
 }
 function fakeAi(data, callback = () => {}) {
-  return { respond: async (input) => { callback(input); return { data, model: "test-actions", requestId: "test-action-request", usage: {} }; } };
+  return { respond: async (input) => {
+    callback(input);
+    const actions = data.actions.map(({ evidence, ...action }) => ({ ...action, evidenceIds: evidence.map(({ feedbackId, quote }) =>
+      input.input.records.find((record) => record.id === feedbackId)?.passages.find((passage) => passage.text.includes(quote))?.id || "unknown-quote") }));
+    return { data: { ...data, actions }, model: "test-actions", requestId: "test-action-request", usage: {} };
+  } };
 }
 
 test("all-month aggregation merges three feedback records into one pending action", async (t) => {
@@ -34,6 +39,12 @@ test("all-month aggregation merges three feedback records into one pending actio
   assert.deepEqual(sent.input.records.map((record) => record.id), ["F1", "F2", "F3"]);
   assert.equal(sent.input.scope.month, "全部月份");
   assert.equal(sent.input.sourceCount, 3);
+  assert.equal(sent.input.records[0].passages[0].text, store.get("feedback", "F1").content);
+  assert.equal(sent.schema.properties.actions.items.properties.evidence, undefined);
+  assert.ok(sent.schema.properties.actions.items.properties.evidenceIds);
+  assert.match(sent.prompt, /核验：.*措施：.*验收：/);
+  assert.match(sent.prompt, /不能把过去的反馈断言为今天仍在发生/);
+  assert.match(sent.prompt, /不能为每条反馈逐条生成行动/);
   assert.equal(result.sourceCount, 3);
   assert.equal(result.actions.length, 1);
   const action = result.actions[0];
@@ -43,6 +54,7 @@ test("all-month aggregation merges three feedback records into one pending actio
   assert.equal(action.revision, 1);
   assert.equal(action.demo, false);
   assert.deepEqual(action.feedbackIds, ["F1", "F2", "F3"]);
+  assert.equal(action.evidence[0].quote, store.get("feedback", "F1").content);
   assert.equal(result.reused, false);
   assert.deepEqual(Object.keys(result.analysis).sort(), ["createdAt", "id", "sourceCount", "sourceFingerprint", "summary"]);
   assert.ok(!JSON.stringify(result).includes(getSettings(store).feedbackPrompt));
@@ -64,6 +76,32 @@ test("not every feedback requires an action, zero proposals and empty scopes are
   await summarizeActions(store, ai);
   assert.equal(calls, 1, "an empty action list is also cached");
   assert.throws(() => getActionSummary(store, { month: "2026-13" }));
+});
+
+test("real generation failure preserves existing actions and analysis without fabricating replacements", async (t) => {
+  const store = database(t);
+  await summarizeActions(store, fakeAi({ summary: "已分析", actions: [proposal()] }));
+  const before = getActionSummary(store);
+  const actions = store.all("actions");
+  await assert.rejects(summarizeActions(store, { respond: async () => { throw new Error("Azure AI 请求失败"); } }, { force: true }), /Azure AI/);
+  assert.deepEqual(store.all("actions"), actions);
+  assert.deepEqual(getActionSummary(store), before);
+});
+
+test("model selects exact source passages; long feedback is complete and mismatched references fail closed", async (t) => {
+  const content = "希望改进供餐".repeat(120) + "🥗请保留结尾";
+  const store = database(t, [feedback("F1", content), feedback("F2", "第二条独立反馈")]);
+  const { evidence: _evidence, ...base } = proposal({ feedbackIds: ["F1"] });
+  const ai = { respond: async ({ input }) => {
+    assert.equal(input.records[0].passages.map((item) => item.text).join(""), content);
+    assert.ok(input.records[0].passages.every((item) => item.text.length <= 400));
+    return { data: { summary: "需要改善供餐", actions: [{ ...base, evidenceIds: [input.records[0].passages.at(-1).id] }] } };
+  } };
+  const result = await summarizeActions(store, ai);
+  assert.ok(content.endsWith(result.actions[0].evidence[0].quote));
+  const before = store.all("actions");
+  await assert.rejects(summarizeActions(store, { respond: async ({ input }) => ({ data: { summary: "错误引用", actions: [{ ...base, evidenceIds: [input.records[1].passages[0].id] }] } }) }, { force: true }), /原文片段/);
+  assert.deepEqual(store.all("actions"), before);
 });
 
 test("cache and force refresh preserve manual approval, edited title and execution details", async (t) => {

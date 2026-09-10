@@ -49,10 +49,17 @@ export function createDiningApi(options) {
     plans: {
       list: () => get("/plans"), get: (id) => get(`/plans/${idPart(id)}`),
       generate: (input) => post("/plans/generate", input), save: (plan) => post("/plans", plan),
+      generateProgressive: (input, options = {}) => http.stream("/plans/generate-stream", { ...options, method: "POST", body: input }),
       check: (plan) => post("/plans/check", plan), inspect: (plan) => post("/plans/inspect", plan),
+      repair: (input) => post("/plans/repair", input),
       run: (id) => get(`/menu-runs/${idPart(id)}`),
+      recoverableRuns: () => get("/menu-runs", { recoverable: true }),
+      resume: (id) => { idPart(id); return post("/plans/resume", { runId: id }); },
+      resumeProgressive: (id, options = {}) => { idPart(id); return http.stream("/plans/resume-stream", { ...options, method: "POST", body: { runId: id } }); },
+      result: (id) => get(`/menu-runs/${idPart(id)}/result`),
     },
     analytics: { get: (scope) => get("/pos", scope), importCsv: (csv) => post("/pos/import", { csv }) },
+    prompts: { get: () => get("/prompt-config"), save: (input) => http.send("/prompt-config", { method: "PUT", body: input }) },
     system: { health: () => get("/health"), aiStatus: () => get("/ai/status"), audit: () => get("/audit") },
   });
 }

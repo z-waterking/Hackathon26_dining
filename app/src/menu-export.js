@@ -23,6 +23,19 @@ export function menuRows(plan, dishes) {
       ? `${dish.name}（¥${dish.priceText ?? dish.price}）`
       : "待补菜";
   }
+  for (const staple of plan.fixedStaples || []) {
+    if (!plan.meals.includes(staple.meal)) continue;
+    for (let week = 1; week <= 6; week++) {
+      const monday = new Date(`${plan.start}T00:00:00Z`);
+      monday.setUTCDate(monday.getUTCDate() + (week - 1) * 7);
+      const friday = new Date(monday);
+      friday.setUTCDate(friday.getUTCDate() + 4);
+      groups.set(JSON.stringify([week, staple.meal, staple.stall, "fixed-staples"]), {
+        周次: `第${week}周`, 日期: `${monday.toISOString().slice(0, 10)} 至 ${friday.toISOString().slice(0, 10)}`,
+        餐次: staple.meal, 档口: `${staple.stall}（固定主食）`, ...Object.fromEntries(weekdays.map(day => [day, staple.text])),
+      });
+    }
+  }
   const mealOrder = ["早餐", "午餐", "晚餐"];
   return [...groups.values()].sort(
     (left, right) =>

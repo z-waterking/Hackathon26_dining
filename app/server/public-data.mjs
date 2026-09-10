@@ -1,8 +1,9 @@
 // Operational API responses expose business records, not internal AI messages.
 const internalKeys = new Set([
   "plannerPrompt", "inspectorPrompt", "feedbackPrompt", "operatorNotes",
+  "promptConfig", "actionPromptHash", "actionPromptText",
   "prompts", "prompt", "rawPrompt", "systemPrompt", "promptVersion", "settings",
-  "plannerInput", "inspectorInput", "apiKey", "api_key",
+  "plannerInput", "inspectorInput", "plannerBatches", "plannerAttempts", "stallBatches", "inspectorAttempts", "promptHash", "actionReviews", "apiKey", "api_key",
 ]);
 export function publicData(value) {
   if (Array.isArray(value)) return value.map(publicData);

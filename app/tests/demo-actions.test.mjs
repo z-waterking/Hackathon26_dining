@@ -4,6 +4,7 @@ import { createStore } from "../server/store.mjs";
 import { ensureDemoActions } from "../server/demo-actions.mjs";
 import { generateMenu, checkMenu } from "../server/menus.mjs";
 import { approvedMenuActions, attachMenuWorkflow, runMenuWorkflow, runDemoMenuWorkflow, reinspectMenuWorkflow } from "../server/menu-workflow.mjs";
+import { directWeeklyResponse } from "./fixtures/direct-menu.mjs";
 
 const dishes = ["甲档口", "乙档口"].flatMap((stall, group) => Array.from({ length: 12 }, (_, index) => ({
   id: `dish-${group}-${String(index).padStart(2, "0")}`, name: `${stall}菜品${index}`, stall,
@@ -24,7 +25,7 @@ function realAi() {
   const calls = [];
   return { calls, async respond(input) {
     calls.push(input);
-    return { data: input.role === "planner" ? { summary: "仅分析真实行动", decisions: [], unresolved: [] } : { verdict: "pass", summary: "AI测试响应", findings: [] }, model: "mock-ai" };
+    return { data: input.role === "planner" ? directWeeklyResponse(input) : { verdict: "pass", summary: "AI测试响应", findings: [] }, model: "mock-ai" };
   } };
 }
 
@@ -153,7 +154,7 @@ test("formal workflow completely isolates demo actions and demo changes do not i
     store.put("actions", action.id, { ...action, enabled: false, revision: 9 });
     assert.equal(attachMenuWorkflow(store, plan, plan.workflow, settings).workflow.stale, false);
     await assert.rejects(runMenuWorkflow({ store, ai, input: options, settings }), /模拟排菜测试入口/);
-    assert.equal(ai.calls.length, 2);
+    assert.equal(ai.calls.length, 7);
   } finally { store.close(); }
 });
 

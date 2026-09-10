@@ -109,12 +109,12 @@ export function readMaterials(directory = resolve("../materials/inspection")) {
       }
     }
   }
-  function addDish(stall, name, priceText, sheet, row, category = "") {
+  function addDish(stall, name, priceText, sheet, row, category = "", sourceDetails = {}) {
     if (!valid(name) || !valid(priceText)) return;
     const price = Number(priceText.match(/^\d+(?:\.\d+)?/)?.[0]);
     if (!Number.isFinite(price)) return;
     const id = `D-${hash(`${stall}|${key(name)}|${priceText}`)}`;
-    const source = provenance(sheet, row);
+    const source = { ...provenance(sheet, row), ...sourceDetails };
     if (dishes.has(id)) {
       dishes.get(id).sources.push(source);
       return;
@@ -227,13 +227,27 @@ export function readMaterials(directory = resolve("../materials/inspection")) {
     if (cells.B && cells.C) translations.set(key(cells.B), cells.C);
     addDish(riceStall, cells.B, cells.D, riceSheet, row.Row);
   }
-  const fixedSheet = sheets.find((sheet) => sheet.Source.includes("去重T1-3F六周早餐菜单") && sheet.Sheet.trim() === "六周菜单");
-  if (!fixedSheet) throw new Error("Missing fixed breakfast menu sheet");
-  for (const row of fixedSheet.Rows.filter((row) =>
-    [14, 15].includes(row.Row),
-  )) {
-    const cells = columns(row);
-    addDish("宽窄巷子", cells.C, cells.D, fixedSheet, row.Row, "固定出品");
+  // Fixed output is defined by the source rule workbook, not by similarly
+  // positioned breakfast examples. Both meal blocks are retained as provenance
+  // while the existing dish identity merges their identical name/price rows.
+  const fixedSheets = sheets.filter((sheet) => sheet.Source === "餐厅排菜规则+示例.xlsx" &&
+    sheet.Sheet.startsWith("排菜规则") && sheet.Sheet.includes("宽窄巷子"));
+  if (fixedSheets.length !== 1) throw new Error("宽窄巷子固定出品缺少唯一可信的排菜规则来源，未导入早餐替代菜品");
+  const [fixedSheet] = fixedSheets;
+  for (const [meal, startRow] of [["午餐", 14], ["晚餐", 49]]) {
+    const header = columns(fixedSheet.Rows.find((row) => row.Row === startRow) || { Cells: [] });
+    if (header.A !== "宽窄巷子" || !/此档口固定出品/.test(header.B || ""))
+      throw new Error(`宽窄巷子${meal}固定出品源位置 A${startRow}:D${startRow + 1} 不符，请核对源规则文件`);
+    for (const rowNumber of [startRow, startRow + 1]) {
+      const row = fixedSheet.Rows.find((item) => item.Row === rowNumber);
+      const cells = columns(row || { Cells: [] });
+      if (!valid(cells.C) || !/^(\d+(?:\.\d+)?)\s*元?\s*[/／]\s*(100g|100克|份|个|斤)$/i.test(cells.D || ""))
+        throw new Error(`宽窄巷子${meal}固定出品 C${rowNumber}:D${rowNumber} 缺少名称或明确价格单位`);
+      const priceText = cells.D.replace(/100克|100g/ig, "100g").replace(/／/g, "/").replace(/\s/g, "");
+      addDish("宽窄巷子", cells.C, priceText, fixedSheet, rowNumber, "固定出品", {
+        cell: `C${rowNumber}`, priceCell: `D${rowNumber}`, meal, kind: "fixed-menu-rule",
+      });
+    }
   }
   const feedback = [];
   let blankRows = 0;

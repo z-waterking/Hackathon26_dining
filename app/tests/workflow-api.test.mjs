@@ -6,6 +6,7 @@ import { resolve } from "node:path";
 import { createStore } from "../server/store.mjs";
 import { createApp } from "../server/app.mjs";
 import { getSettings } from "../server/settings.mjs";
+import { directWeeklyResponse } from "./fixtures/direct-menu.mjs";
 
 test("workflow aggregates feedback, edits actions, hides internal prompts and distrusts forged menu evidence", async () => {
   const temporary = mkdtempSync(resolve(tmpdir(), "dining-workflow-api-"));
@@ -19,10 +20,9 @@ test("workflow aggregates feedback, edits actions, hides internal prompts and di
     if (role === "feedback") return { data: { summary: "增加素食", replyDraft: "感谢反馈，将提交评估", keywords: ["素食"],
       actions: [{ title: "增加素菜", description: "午餐素食选择", targetStall: "测试档口", menuInstruction: "优先选择D0", priority: "medium" }] }, model: "test" };
     if (role === "actions") return { data: { summary: "多条反馈集中希望增加午餐素菜", actions: [{ sourceKey: "", kind: "menu",
-      feedbackIds: input.records.map((item) => item.id), evidence: input.records.map((item) => ({ feedbackId: item.id, quote: item.content })),
+      feedbackIds: input.records.map((item) => item.id), evidenceIds: input.records.map((item) => item.passages[0].id),
       title: "增加素菜", description: "结合多条反馈评估午餐素菜选择", targetStall: "测试档口", menuInstruction: "优先选择D0", priority: "medium" }] }, model: "test" };
-    if (role === "planner") return { data: { summary: "按批准行动排菜", decisions: [{ dishId: "D0", kind: "prefer", weight: 2,
-      actionIds: [input.approvedActions[0].id], ruleIds: [], reason: "按运营审批" }], unresolved: [] }, model: "test" };
+    if (role === "planner") return { data: directWeeklyResponse({ input }), model: "test" };
     return { data: { verdict: "pass", summary: "已查看完整菜单，仍需人工核验", findings: [] }, model: "test" };
   } };
   const app = createApp(store, resolve(temporary, "no-dist"), { ai, root: temporary,
@@ -81,7 +81,7 @@ test("workflow aggregates feedback, edits actions, hides internal prompts and di
     assert.equal((await request(`/api/plans/${saved.data.id}`)).data.workflow.stale, true);
     assert.equal((await request("/api/feedback/summary?month=2026-09")).data.total, 2);
     assert.ok((await request("/api/audit")).data.length >= 5);
-    assert.deepEqual(calls, ["feedback", "actions", "planner", "inspector", "inspector"]);
+    assert.deepEqual(calls, ["feedback", "actions", ...Array(6).fill("planner"), "inspector", "inspector"]);
     for (const name of ["微软BJW园区餐饮反馈(1-149).xlsx", "新餐厅反馈记录表-from 202607 2.xlsx"]) writeFileSync(resolve(temporary, name), "synthetic-source");
     const batch = await request("/api/feedback/convert", { import: true });
     assert.equal(batch.status, 200);

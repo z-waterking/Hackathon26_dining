@@ -207,7 +207,12 @@ export function monthlySummary(store, month) {
   const keywords = diningKeywordCounts(store, records);
   const sourceFingerprint = hash({ keywordVersion: 2, keywords, records: records.map((item) => [item.id, fingerprint(item), item.status]) });
   const saved = store.get("meta", `feedback-summary-${month}`);
-  const actions = store.all("actions").filter((action) => records.some((item) => item.id === action.feedbackId));
+  const feedbackIds = new Set(records.map((item) => item.id));
+  // Aggregate Actions may cite several months. Count an Action once in each
+  // relevant month, while retaining legacy single-feedback links.
+  const actions = store.all("actions").filter((action) => !action.demo &&
+    [...(Array.isArray(action.feedbackIds) ? action.feedbackIds : []), action.feedbackId]
+      .some((id) => typeof id === "string" && feedbackIds.has(id)));
   return { month, total: records.length, summaryRecords: all.length - records.length,
     keywords, sourceFingerprint, approvedActions: actions.filter((action) => action.status === "approved").length,
     pendingActions: actions.filter((action) => action.status === "pending").length,

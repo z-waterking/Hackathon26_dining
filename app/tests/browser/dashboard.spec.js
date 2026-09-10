@@ -35,8 +35,9 @@ test("feedback home has four dashboards, a real word cloud and one Action entry"
   expect(mutations).toEqual([]);
   await page.locator(".fd-hero").getByRole("button").click();
   await expect(page.getByRole("heading", { name: "Action 事项", exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "汇总反馈生成改善事项", exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "加载示例 Action", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "AI 生成改善事项", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "加载示例 Action", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "示例事项", exact: true })).toHaveCount(0);
   await expect(page.getByLabel("排菜员 Prompt")).toHaveCount(0);
   expect(errors).toEqual([]);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBeTruthy();
@@ -98,7 +99,7 @@ test("dashboard type trends, external cloud and empty month share the selected r
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBeTruthy();
 });
 
-test("approved demo action affects simulated menu and can be reinspected without Azure calls", async ({ page }, testInfo) => {
+test("new demo menu entry is hidden while an explicitly stored historical demo remains readable", async ({ page }, testInfo) => {
   const errors = [];
   const externalRequests = [];
   page.on("pageerror", (error) => errors.push(error.message));
@@ -106,26 +107,25 @@ test("approved demo action affects simulated menu and can be reinspected without
   const before = await (await page.request.get("/api/data")).json();
   await page.goto("/");
   await page.getByRole("navigation").getByRole("button", { name: /Action 事项/ }).click();
-  const seedResponse = page.waitForResponse((response) => response.url().endsWith("/api/demo/actions"));
-  await page.getByRole("button", { name: "加载示例 Action", exact: true }).click();
-  const seeded = await (await seedResponse).json();
+  // Legacy fixtures are created only by the isolated test, never by the Action UI.
+  const seededResponse = await page.request.post("/api/demo/actions", { data: {} });
+  expect(seededResponse.ok()).toBeTruthy();
+  const seeded = await seededResponse.json();
   const preset = seeded.actions.find((action) => action.id === "A-demo-aggregate-prefer");
   expect(preset).toBeTruthy();
-  const actionCard = page.locator(".action-card").filter({ hasText: preset.title });
-  await actionCard.locator("summary").first().click();
-  await expect(actionCard.getByLabel("排菜调整要求")).toHaveValue(preset.menuInstruction);
-  const approvalResponse = page.waitForResponse((response) => response.url().endsWith(`/api/actions/${preset.id}`) && response.request().method() === "PATCH");
-  await actionCard.getByRole("button", { name: "批准 / Approve" }).click();
-  const approved = await (await approvalResponse).json();
+  await page.reload();
+  await page.getByRole("navigation").getByRole("button", { name: /Action 事项/ }).click();
+  await expect(page.locator(".action-module")).not.toContainText(preset.title);
+  await expect(page.getByRole("button", { name: "加载示例 Action", exact: true })).toHaveCount(0);
+  const approved = await (await page.request.patch(`/api/actions/${preset.id}`, { data: { status: "approved", reason: "隔离测试批准" } })).json();
   expect(approved.status).toBe("approved");
   expect(approved.menuInstruction).toBe(preset.menuInstruction);
-  await expect(actionCard).toContainText("已批准");
   await page.getByRole("navigation").getByRole("button", { name: /六周菜单/ }).click();
-  await page.getByRole("checkbox", { name: "模拟排菜测试（不调用 AI）", exact: true }).check();
-  const generatedResponse = page.waitForResponse((response) => response.url().endsWith("/api/plans/generate"));
-  await page.getByRole("button", { name: "一次生成全部档口六周菜单", exact: true }).click();
-  const response = await generatedResponse;
-  expect(response.request().postDataJSON()).toMatchObject({ demo: true, useAi: false });
+  await expect(page.getByRole("checkbox", { name: "模拟排菜测试（不调用 AI）", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("checkbox", { name: "启用 AI 排菜员与检验员", exact: true })).toBeChecked();
+  // Seed the historical result only through this isolated test API. The user
+  // interface must no longer offer a new demo generation action.
+  const response = await page.request.post("/api/plans/generate", { data: { scope: "all", start: "2026-09-14", count: 4, seed: 1, meals: ["午餐"], demo: true, useAi: false } });
   expect(response.ok()).toBeTruthy();
   const plan = await response.json();
   expect(plan.demo || plan.workflow.demo || plan.workflow.mode === "demo").toBeTruthy();
@@ -133,9 +133,13 @@ test("approved demo action affects simulated menu and can be reinspected without
   expect(impact).toBeTruthy();
   expect(impact.revision).toBe(approved.revision);
   expect(impact.evidence.length).toBeGreaterThan(0);
+  const saved = await page.request.post("/api/plans", { data: plan });
+  expect(saved.ok()).toBeTruthy();
+  await page.reload();
+  await page.getByRole("button", { name: /草案记录/ }).click();
+  await page.getByRole("dialog", { name: "已保存草案" }).locator(".history-list button").first().click();
   await expect(page.locator(".workflow-section")).toContainText("不调用 Azure AI");
-  const impactCard = page.locator(".action-impacts > details").filter({ hasText: preset.title });
-  await impactCard.locator("summary").click();
+  const impactCard = page.locator(".menu-impact-card").filter({ hasText: preset.title });
   await expect(impactCard).toContainText("本次选用");
   await expect(impactCard).toContainText("变化槽位");
   await page.screenshot({ path: testInfo.outputPath("demo-menu-action-impact.png") });

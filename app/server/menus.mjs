@@ -44,14 +44,52 @@ export function generateMenu(dishes, input, feedback = [], selectionPolicy = [])
   return { ...plan, validation: validateMenu(plan, dishes) };
 }
 
+// The caller supplies a server-owned source snapshot. This check reports
+// mismatches only; it never turns historical catalog mistakes into fixed dishes
+// or rewrites a model-selected menu. Source order does not constrain slot order.
+export function validateFixedMenuSources(plan, dishes, trustedFixedDishes = []) {
+  if (plan.generationMode !== "gpt-direct") return [];
+  const sources = Array.isArray(trustedFixedDishes) ? trustedFixedDishes : [];
+  const fixedStalls = new Set(["宽窄巷子", ...sources.map((dish) => dish.stall)]);
+  const key = (dish) => JSON.stringify([dish.name.replace(/\s/g, ""), dish.price, dish.unit]);
+  const byId = new Map(dishes.map((dish) => [dish.id, dish]));
+  const groups = new Map();
+  for (const entry of plan.entries) {
+    const stall = entry.stall || plan.stall;
+    if (!fixedStalls.has(stall)) continue;
+    const groupKey = JSON.stringify([entry.date, entry.meal, stall]);
+    if (!groups.has(groupKey)) groups.set(groupKey, { stall, date: entry.date, meal: entry.meal, entries: [] });
+    groups.get(groupKey).entries.push(entry);
+  }
+  return [...groups.values()].flatMap((group) => {
+    const expected = sources.filter((dish) => dish.stall === group.stall && dish.meal === group.meal);
+    const validSource = expected.length && expected.every((dish) => typeof dish.name === "string" && dish.name.trim() &&
+      Number.isFinite(dish.price) && typeof dish.unit === "string" && dish.unit.trim());
+    const actual = group.entries.map((entry) => byId.get(entry.dishId));
+    const matches = validSource && actual.every(Boolean) &&
+      JSON.stringify(actual.map(key).sort()) === JSON.stringify(expected.map(key).sort());
+    if (matches) return [];
+    return [{
+      level: "error", code: "FIXED_SOURCE", date: group.date, meal: group.meal, stall: group.stall,
+      text: validSource
+        ? `固定出品与源排菜表不一致，必须保留同名、同价、同单位的 ${expected.map((dish) => `${dish.name}（${dish.price}元/${dish.unit}）`).join("、")}。原菜单未替换，请核对菜库来源并补齐。`
+        : "缺少此餐次可信的固定出品来源，不能把现有菜库内容当作源表固定菜单；原菜单未替换，请同步规则并人工复核。",
+    }];
+  });
+}
+
 export function validateMenu(plan, dishes, previous = null) {
-  if (plan.scope !== "all")
-    return validatePlan(
+  const fixedIssues = validateFixedMenuSources(plan, dishes, plan.fixedDishes);
+  if (plan.scope !== "all") {
+    const validation = validatePlan(
       plan,
       dishes,
       previous?.scope === "all" ? null : previous,
     );
-  const issues = [];
+    const issues = [...validation.issues, ...fixedIssues];
+    return { ...validation, issues, errors: issues.filter((issue) => issue.level === "error").length, warnings: issues.filter((issue) => issue.level === "warning").length };
+  }
+  const issues = [...fixedIssues];
   let verifiedEntries = 0;
   let changedEntries = 0;
   let comparable =
@@ -81,8 +119,16 @@ export function validateMenu(plan, dishes, previous = null) {
   }
   const byId = new Map(dishes.map((dish) => [dish.id, dish]));
   const occurrences = new Map();
+  const sharedMenus = new Map();
+  const sharedKey = (dish) => JSON.stringify([dish.name.replace(/\s/g, ""), dish.price, dish.unit]);
   for (const entry of plan.entries) {
     const dish = byId.get(entry.dishId);
+    if (["寻味列车", "五味坊"].includes(entry.stall)) {
+      const mealKey = JSON.stringify([entry.date, entry.meal]);
+      if (!sharedMenus.has(mealKey))
+        sharedMenus.set(mealKey, { date: entry.date, meal: entry.meal, source: [], shared: [] });
+      sharedMenus.get(mealKey)[entry.stall === "寻味列车" ? "source" : "shared"].push(dish || null);
+    }
     if (!dish) continue;
     if (
       dish.spicy !== "未知" &&
@@ -102,11 +148,29 @@ export function validateMenu(plan, dishes, previous = null) {
         meal: entry.meal,
         name: dish.name,
         stalls: new Set(),
+        variants: new Map(),
       });
     occurrences.get(key).stalls.add(entry.stall);
+    if (!occurrences.get(key).variants.has(entry.stall)) occurrences.get(key).variants.set(entry.stall, new Set());
+    occurrences.get(key).variants.get(entry.stall).add(sharedKey(dish));
+  }
+  for (const meal of sharedMenus.values()) {
+    if (!meal.shared.length) continue;
+    const selections = meal.shared.filter(Boolean);
+    const expectedPrices = selections.map((dish) => dish.price).sort((left, right) => left - right);
+    const sourceKeys = new Set(meal.source.filter(Boolean).map(sharedKey));
+    if (meal.shared.length !== 4 || JSON.stringify(expectedPrices) !== JSON.stringify([4, 5, 8, 8]) ||
+      selections.some((dish) => !sourceKeys.has(sharedKey(dish))))
+      issues.push({
+        level: "error", code: "SHARED_MENU", date: meal.date, meal: meal.meal, stall: "五味坊",
+        text: "五味坊每餐必须从同餐寻味列车选择同名、同价、同单位的两道 8 元菜和相同的 5 元、4 元菜；源餐次缺菜时需先补齐。",
+      });
   }
   for (const occurrence of occurrences.values()) {
     if (occurrence.stalls.size < 2) continue;
+    const allowedShare = occurrence.stalls.size === 2 && occurrence.stalls.has("寻味列车") && occurrence.stalls.has("五味坊") &&
+      [...occurrence.variants.get("五味坊")].every((variant) => occurrence.variants.get("寻味列车").has(variant));
+    if (allowedShare) continue;
     issues.push({
       level: "warning",
       code: "CROSS_STALL_DUPLICATE",
@@ -135,7 +199,7 @@ export function validateMenu(plan, dishes, previous = null) {
   };
 }
 
-export function checkMenu(dishes, input, previous = null) {
+export function checkMenu(dishes, input, previous = null, { fixedDishes = [] } = {}) {
   const options =
     input.scope === "all"
       ? batchOptionsSchema.parse(input)
@@ -173,6 +237,7 @@ export function checkMenu(dishes, input, previous = null) {
   const structure = {
     ...options,
     ...(input.scope === "all" ? { stall: "全部档口", stalls } : {}),
+    ...(input.generationMode === "gpt-direct" ? { generationMode: "gpt-direct", fixedDishes: structuredClone(fixedDishes) } : {}),
     entries: expectedEntries,
     createdAt: new Date().toISOString(),
   };

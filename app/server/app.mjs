@@ -17,11 +17,17 @@ import { createAiClient } from "./ai.mjs";
 import { getSettings } from "./settings.mjs";
 import { analyzeFeedback, saveReply, updateAction, summarizeMonth } from "./feedback-ai.mjs";
 import { convertAndImport, uploadAndImport, MAX_FEEDBACK_UPLOAD_BYTES } from "./bootstrap.mjs";
-import { runMenuWorkflow, attachMenuWorkflow, reinspectMenuWorkflow, runDemoMenuWorkflow } from "./menu-workflow.mjs";
+import { runMenuWorkflow, attachMenuWorkflow, reinspectMenuWorkflow, runDemoMenuWorkflow, resumeMenuWorkflow } from "./menu-workflow.mjs";
 import { ensureDemoActions } from "./demo-actions.mjs";
 import { summarizeActions } from "./action-summary.mjs";
 import { publicData } from "./public-data.mjs";
 import { createQueryService } from "./data/query-service.mjs";
+import { syncMenuSourceRules } from "./menu-source-rules.mjs";
+import { createNetworkAccess } from "./network-access.mjs";
+import { streamMenuProgress } from "./menu-progress-stream.mjs";
+import { requireStoredStallCatalog } from "./stored-stall-catalog.mjs";
+import { repairMenuConflict } from "./menu-repair.mjs";
+import { savePromptConfig } from "./prompt-config.mjs";
 
 const hash = (value) => createHash("sha256").update(value).digest("hex");
 export function createApp(
@@ -30,10 +36,16 @@ export function createApp(
   options = {},
 ) {
   const app = Fastify({ bodyLimit: 5 * 1024 * 1024, logger: false });
+  const networkAccess = options.networkAccess || createNetworkAccess();
   app.addContentTypeParser("application/octet-stream", { parseAs: "buffer", bodyLimit: MAX_FEEDBACK_UPLOAD_BYTES }, (_request, body, done) => done(null, body));
   const ai = options.ai || createAiClient(store);
   getSettings(store);
   const queries = createQueryService(store, { ai, root: options.root });
+  async function syncMenuInputs() {
+    if (!options.menuRuleRoot) return;
+    requireStoredStallCatalog(store);
+    await syncMenuSourceRules(store, options.menuRuleRoot);
+  }
   app.addHook("preSerialization", async (_request, _reply, payload) => publicData(payload));
   const activeTasks = new Set();
   async function exclusive(key, action) {
@@ -45,12 +57,11 @@ export function createApp(
     response.header("X-Content-Type-Options", "nosniff");
     response.header("X-Frame-Options", "DENY");
     response.header("Referrer-Policy", "no-referrer");
-    const host = request.hostname;
-    if (!["127.0.0.1", "localhost", "::1"].includes(host))
-      return response.status(403).send({ error: "仅允许本机访问" });
+    if (!networkAccess.allowsHost(request.hostname))
+      return response.status(403).send({ error: "访问地址不在允许列表中" });
     if (!["GET", "HEAD"].includes(request.method)) {
       const origin = request.headers.origin;
-      if (origin && !/^http:\/\/(127\.0\.0\.1|localhost):\d+$/.test(origin))
+      if (!networkAccess.allowsOrigin(origin, request.headers.host))
         return response.status(403).send({ error: "来源不允许" });
       const uploading = request.method === "POST" && request.url.split("?")[0] === "/api/feedback/upload";
       if (uploading && !request.headers["content-type"]?.startsWith("application/octet-stream"))
@@ -76,8 +87,15 @@ export function createApp(
   app.get("/api/settings", (_request, response) => response.status(404).send({ error: "此入口已停用，请在Action模块管理改善事项" }));
   app.put("/api/settings", (_request, response) => response.status(404).send({ error: "此入口已停用，请在Action模块管理改善事项" }));
   app.get("/api/ai/status", (_request, response) => response.send(queries.aiStatus()));
+  app.get("/api/prompt-config", (_request, response) => response.send(queries.promptConfig()));
+  app.put("/api/prompt-config", (request, response) => {
+    savePromptConfig(store, request.body);
+    return response.send(queries.promptConfig());
+  });
   app.get("/api/audit", (_request, response) => response.send(queries.audit()));
   app.get("/api/menu-runs/:id", (request, response) => response.send(queries.menuRun(request.params.id)));
+  app.get("/api/menu-runs", (_request, response) => response.send(queries.menuRuns()));
+  app.get("/api/menu-runs/:id/result", (request, response) => response.send(queries.menuRunResult(request.params.id)));
   app.get("/api/actions/summary", (request, response) => {
     const scope = z.object({ month: z.string().default(""), demo: z.enum(["true", "false"]).default("false") }).parse(request.query);
     return response.send(queries.actionSummary({ month: scope.month, demo: scope.demo === "true" }));
@@ -210,11 +228,32 @@ export function createApp(
     store.put("dishes", item.id, item);
     response.send(item);
   });
+  app.post("/api/plans/generate-stream", async (request, response) => {
+    if (request.body?.demo === true || request.body?.useAi !== true) throw new Error("逐周实时生成仅用于正式 AI 排菜");
+    await exclusive("menu-workflow", () => streamMenuProgress(response, async onProgress => {
+      await syncMenuInputs();
+      return runMenuWorkflow({ store, ai, input: request.body, settings: getSettings(store), onProgress,
+        ruleSourcePath: options.menuRuleRoot ? resolve(options.menuRuleRoot, "餐厅排菜规则+示例.xlsx") : undefined });
+    }));
+    return response;
+  });
+  app.post("/api/plans/resume-stream", async (request, response) => {
+    const { runId } = z.object({ runId: z.string().min(1).max(150) }).strict().parse(request.body);
+    await exclusive("menu-workflow", () => streamMenuProgress(response, async onProgress => {
+      await syncMenuInputs();
+      return resumeMenuWorkflow({ store, ai, runId, settings: getSettings(store), onProgress,
+        ruleSourcePath: options.menuRuleRoot ? resolve(options.menuRuleRoot, "餐厅排菜规则+示例.xlsx") : undefined });
+    }));
+    return response;
+  });
   app.post("/api/plans/generate", async (request, response) => {
     if (request.body.demo === true)
       return response.send(await exclusive("menu-workflow", () => runDemoMenuWorkflow({ store, input: request.body, settings: getSettings(store) })));
     if (request.body.useAi === true) {
-      const result = await exclusive("menu-workflow", () => runMenuWorkflow({ store, ai, input: request.body, settings: getSettings(store) }));
+      const result = await exclusive("menu-workflow", async () => {
+        await syncMenuInputs();
+        return runMenuWorkflow({ store, ai, input: request.body, settings: getSettings(store), ruleSourcePath: options.menuRuleRoot ? resolve(options.menuRuleRoot, "餐厅排菜规则+示例.xlsx") : undefined });
+      });
       return response.send(result);
     }
     const dishes = store.all("dishes");
@@ -229,6 +268,11 @@ export function createApp(
     });
   });
   function checkedPlan(input) {
+    if (input.partial === true) throw new Error("逐周预览尚未完成生成与检验，不能保存、修改或提交审核");
+    if ((input.generationMode === "gpt-direct" || input.generationRunId) && !input.workflow?.runId)
+      throw new Error("真实 AI 菜单必须有已完成的生成与检验记录，不能将逐周预览作为完整草案");
+    if (input.generationRunId && input.generationRunId !== input.workflow.runId)
+      throw new Error("逐周菜单所属生成记录与检验记录不一致");
     const dishes = store.all("dishes");
     const previous = store
       .all("plans")
@@ -241,11 +285,24 @@ export function createApp(
     return attachMenuWorkflow(store, checked, input.workflow, getSettings(store));
   }
   app.post("/api/plans/inspect", async (request, response) => {
+    if (request.body.demo !== true) await syncMenuInputs();
     const prior = store.get("menuRuns", request.body.workflow?.runId || "");
     if (prior && (request.body.demo === true) !== (prior.demo === true))
       throw new Error("模拟和正式菜单的检验模式不可混用；模拟检验需显式 demo: true");
     const checked = checkedPlan(request.body);
     return response.send(await exclusive("menu-workflow", () => reinspectMenuWorkflow({ store, ai, input: checked, settings: getSettings(store) })));
+  });
+  app.post("/api/plans/repair", async (request, response) => response.send(await exclusive("menu-workflow", async () => {
+    await syncMenuInputs();
+    return repairMenuConflict({ store, ai, input: request.body, settings: getSettings(store) });
+  })));
+  app.post("/api/plans/resume", async (request, response) => {
+    const { runId } = z.object({ runId: z.string().min(1).max(150) }).strict().parse(request.body);
+    return response.send(await exclusive("menu-workflow", async () => {
+      await syncMenuInputs();
+      return resumeMenuWorkflow({ store, ai, runId, settings: getSettings(store),
+        ruleSourcePath: options.menuRuleRoot ? resolve(options.menuRuleRoot, "餐厅排菜规则+示例.xlsx") : undefined });
+    }));
   });
   app.post("/api/plans/check", (request, response) =>
     response.send(checkedPlan(request.body)),
@@ -332,8 +389,8 @@ export function createApp(
             .join("；")
         : error.message;
     response
-      .status([413, 502, 503].includes(error.statusCode) ? error.statusCode : 400)
-      .send({ error: message || "请求失败" });
+      .status([409, 413, 502, 503].includes(error.statusCode) ? error.statusCode : 400)
+      .send({ error: message || "请求失败", ...(error.runId ? { runId: error.runId, ...error.diagnostics } : {}) });
   });
   return app;
 }

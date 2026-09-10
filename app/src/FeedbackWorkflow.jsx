@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
 import { Check, FileCheck2, Save, Sparkles, X } from "lucide-react";
-import { Badge, Empty, Field } from "./shared";
+import { Badge, Empty, Field, Modal } from "./shared";
 import { diningApi } from "./api/dining";
 import { readable } from "./ui-text";
 import FeedbackWordCloud from "./FeedbackWordCloud";
+import ActionCard from "./ActionCard";
 
 const actionLabels = { pending: "待审批", approved: "已批准", rejected: "已拒绝" };
 const dateText = (value) => value ? new Date(value).toLocaleString("zh-CN") : "时间待核验";
@@ -51,16 +52,16 @@ function ActionEditor({ action, run, busy, showSource, feedback }) {
   });
   const history = action.history || action.revisions || action.adjustments || [];
   return (
-    <details className="action-card">
-      <summary>
-        <span><strong>{action.title}</strong><small>{action.targetStall || "全部档口"} · {(action.feedbackIds || [action.feedbackId]).filter(Boolean).length} 条相关反馈 · 版本 {action.revision || 1}</small></span>
+    <div className="action-editor">
+      <div className="action-editor-meta">
+        <span>{action.targetStall || "全部档口"} · {(action.feedbackIds || [action.feedbackId]).filter(Boolean).length} 条相关反馈 · 版本 {action.revision || 1}</span>
         <span className="badge-group"><Badge tone={action.status === "approved" ? "green" : action.status === "rejected" ? "gray" : "gold"}>{actionLabels[action.status] || action.status}</Badge>{action.enabled === false && <Badge>已停用</Badge>}</span>
-      </summary>
+      </div>
       {action.demo && <p className="notice">示例事项 · 可编辑、审批并测试模拟排菜。修改预设排菜要求后，模拟器会标记需人工复核。</p>}
       {showSource && <details className="action-evidence"><summary>查看关联反馈与依据（{(action.feedbackIds || [action.feedbackId]).filter(Boolean).length}条）</summary>{(action.feedbackIds || [action.feedbackId]).filter(Boolean).map((id) => { const item = feedback.find((record) => record.id === id); const evidence = (action.evidence || []).filter((entry) => entry.feedbackId === id); return <blockquote key={id}><small>{item?.date || ""} · {item?.restaurant || "来源反馈"} · {id}</small><p>{evidence.map((entry) => entry.quote).join("；") || item?.content || "来源记录暂不可用"}</p></blockquote>; })}</details>}
       <form onSubmit={(event) => { event.preventDefault(); save(); }}>
         <Field label="Action 标题"><input required minLength={2} maxLength={150} value={draft.title} onChange={(event) => update("title", event.target.value)} /></Field>
-        <Field label="改善说明"><textarea rows={2} required minLength={2} maxLength={2000} value={draft.description} onChange={(event) => update("description", event.target.value)} /></Field>
+        <Field label="改善说明"><textarea rows={5} required minLength={2} maxLength={2000} value={draft.description} onChange={(event) => update("description", event.target.value)} /></Field>
         <div className="form-grid">
           <Field label="影响档口"><input required maxLength={100} list="stall-list" placeholder="全部档口" value={draft.targetStall} onChange={(event) => update("targetStall", event.target.value)} /></Field>
           <Field label="优先级"><select value={draft.priority} onChange={(event) => update("priority", event.target.value)}><option value="high">高</option><option value="medium">中</option><option value="low">低</option></select></Field>
@@ -75,12 +76,20 @@ function ActionEditor({ action, run, busy, showSource, feedback }) {
         </footer>
       </form>
       {history.length > 0 && <details className="audit-details"><summary>调整记录 · {history.length}</summary><div className="timeline">{history.map((item, index) => <div key={item.id || index}><small>{dateText(item.at || item.createdAt)} · 版本 {item.revision || index + 1} · {item.kind || actionLabels[item.status] || "调整"}</small><p>{readable(item.reason || item.note || item.description || item.changes || item.status || item)}</p>{item.previous && <details><summary>修改前的 Action 快照</summary><pre className="trace-json">{JSON.stringify(item.previous, null, 2)}</pre></details>}</div>)}</div></details>}
-    </details>
+    </div>
   );
 }
 
-export function ActionList({ actions = [], run, busy, showSource = false, feedback = [], emptyText = "暂无改善事项，可先汇总全部反馈。" }) {
-  return actions.length ? <div className="action-list">{actions.map((action) => <ActionEditor key={`${action.id}-${action.revision || action.updatedAt || action.status}`} action={action} run={run} busy={busy} showSource={showSource} feedback={feedback} />)}</div> : <Empty text={emptyText} />;
+export function ActionList({ actions = [], allActions = actions, run, busy, showSource = false, feedback = [], emptyText = "暂无改善事项，可先汇总全部反馈。" }) {
+  const [selectedId, setSelectedId] = useState(null);
+  // Status changes may remove a card from the filter without dismissing its editor.
+  const selected = allActions.find((action) => action.id === selectedId);
+  return <>
+    {actions.length ? <div className="action-card-grid">{actions.map((action, index) => <ActionCard key={action.id} action={action} index={index} onOpen={() => setSelectedId(action.id)} />)}</div> : <Empty text={emptyText} />}
+    {selected && <Modal title={selected.title} onClose={() => setSelectedId(null)} wide>
+      <ActionEditor key={`${selected.id}-${selected.revision || selected.updatedAt || selected.status}`} action={selected} run={run} busy={busy} showSource={showSource} feedback={feedback} />
+    </Modal>}
+  </>;
 }
 
 export function FeedbackResponse({ feedback, actions = [], aiStatus, run, busy, onNavigate }) {

@@ -59,6 +59,20 @@ const strictStalls = [
   "南粉北面",
   "饺好运",
 ];
+// Only the four hot-food stalls have a two-day exclusion in the workbook.
+// Noodles forbid lunch/dinner overlap; dumplings allow up to 50% overlap.
+const twoDayRepeatStalls = ["寻味列车", "五味坊", "一锅烟火", "蒸心食意"];
+export const manualMenuStalls = Object.freeze(["老广老北", "百变厨房"]);
+const lunchDinnerPair = (left, right) =>
+  (left === "午餐" && right === "晚餐") ||
+  (left === "晚餐" && right === "午餐");
+const repeatedWithinRule = (stall, date, meal, previous) => {
+  if (twoDayRepeatStalls.includes(stall)) {
+    const days = Math.abs(new Date(`${date}T00:00:00Z`) - new Date(`${previous.date}T00:00:00Z`)) / 86400000;
+    return previous.date === date || (previous.meal === meal && days <= 2);
+  }
+  return stall === "南粉北面" && previous.date === date && lunchDinnerPair(previous.meal, meal);
+};
 
 export function slotPrices(stall, count) {
   if (stall === "寻味列车") return [8, 8, 8, 6, 6, 6, 5, 4];
@@ -71,7 +85,7 @@ export function slotPrices(stall, count) {
   return Array(count).fill("*");
 }
 
-function fitsPrice(dish, slot) {
+export function fitsPrice(dish, slot) {
   if (slot === "*") return true;
   if (dish.unit !== "份") return false;
   if (slot === ">=30") return dish.price >= 30;
@@ -116,18 +130,20 @@ export function generatePlan(allDishes, rawOptions, _feedback = [], selectionPol
               )
                 return false;
               if (
-                strictStalls.includes(options.stall) &&
                 entries.some(
                   (entry) =>
                     entry.nameKey === canonical(dish) &&
-                    (entry.date === dateText ||
-                      (entry.meal === meal &&
-                        (date - new Date(`${entry.date}T00:00:00Z`)) /
-                          86400000 <=
-                          2)),
+                    repeatedWithinRule(options.stall, dateText, meal, entry),
                 )
               )
                 return false;
+              if (options.stall === "饺好运") {
+                const otherMealNames = new Set(entries.filter((entry) =>
+                  entry.date === dateText && lunchDinnerPair(entry.meal, meal)).map((entry) => entry.nameKey));
+                if (otherMealNames.has(canonical(dish)) &&
+                  picked.filter((item) => otherMealNames.has(canonical(item))).length >= Math.floor(slots.length / 2))
+                  return false;
+              }
               return true;
             })
             .map((dish) => {
@@ -186,11 +202,17 @@ export function validatePlan(plan, allDishes, previous = null) {
       "MANUAL",
       "该档口缺少完整自动排菜规则，当前为通用草案，需人工确认。",
     );
-  if (plan.stall === "五味坊")
+  if (plan.generationMode === "gpt-direct" && manualMenuStalls.includes(plan.stall))
     add(
       "warning",
-      "RULE_CONFLICT",
-      "五味坊与寻味列车是否共享菜品存在规则冲突，当前为独立草案。",
+      "MANUAL_REQUIRED",
+      "源排菜规则要求此档口人工上传六周菜单；预留槽位待补，不代表 AI 已排满或规则已通过。",
+    );
+  if (plan.generationMode === "gpt-direct" && manualMenuStalls.includes(plan.stall) && plan.entries.some((entry) => entry.dishId))
+    add(
+      "error",
+      "MANUAL_SOURCE_REQUIRED",
+      "此档口需要人工上传的菜单来源，不能以 AI 自动选菜替代；请补充人工菜单并复核。",
     );
   add(
     "warning",
@@ -210,7 +232,13 @@ export function validatePlan(plan, allDishes, previous = null) {
       .map((entry) => byId.get(entry.dishId))
       .filter(Boolean);
     if (dishes.length < entries.length)
-      add("error", "MISSING", "候选菜不足，存在未排菜槽位。", date, meal);
+      add(
+        "error", "MISSING",
+        plan.generationMode === "gpt-direct" && manualMenuStalls.includes(plan.stall)
+          ? "人工菜单尚未上传完整，预留槽位待补；此档口不能标为已排满。"
+          : "候选菜不足，存在未排菜槽位。",
+        date, meal,
+      );
     if (new Set(dishes.map(canonical)).size !== dishes.length)
       add("error", "DUPLICATE", "同餐次存在同名菜重复。", date, meal);
     for (const entry of entries) {
@@ -233,21 +261,30 @@ export function validatePlan(plan, allDishes, previous = null) {
           meal,
         );
       if (
-        strictStalls.includes(plan.stall) &&
         seen.some(
           (prior) =>
             prior.name === canonical(dish) &&
-            (prior.date === date ||
-              (prior.meal === meal &&
-                (new Date(date) - new Date(prior.date)) / 86400000 <= 2)),
+            repeatedWithinRule(plan.stall, date, meal, prior),
         )
       )
         add(
           "error",
           "REPEAT",
-          `${dish.name} 在同日或近两天同餐次重复。`,
+          plan.stall === "南粉北面"
+            ? `${dish.name} 在同日午晚餐重复。`
+            : `${dish.name} 在同日或近两天同餐次重复。`,
           date,
           meal,
+        );
+    }
+    if (plan.stall === "饺好运") {
+      const otherMealNames = new Set(seen.filter((prior) =>
+        prior.date === date && lunchDinnerPair(prior.meal, meal)).map((prior) => prior.name));
+      const overlap = new Set(dishes.filter((dish) => otherMealNames.has(canonical(dish))).map(canonical)).size;
+      if (overlap > Math.floor(slotPrices(plan.stall, plan.count).length / 2))
+        add(
+          "error", "DUMPLING_OVERLAP",
+          `午晚餐有 ${overlap} 种相同水饺，需保证至少 50% 不重复。`, date, meal,
         );
     }
     if (strictStalls.includes(plan.stall)) {
@@ -447,7 +484,7 @@ export const transactionSchema = z
       "金额最多两位小数",
     ),
     status: z.enum(["sale", "refund", "void"]),
-    unit: z.enum(["份", "个", "斤", "100g"]).default("份"),
+    unit: z.enum(["份", "个", "斤", "100g", "位"]).default("份"),
   })
   .refine(
     (item) =>

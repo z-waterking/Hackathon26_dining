@@ -1,7 +1,15 @@
 import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
+import { readFileSync } from "node:fs";
 import { batchOptionsSchema, checkMenu, generateMenu, validateMenu } from "./menus.mjs";
 import { demoPolicyFingerprint } from "./demo-actions.mjs";
+import { DIRECT_MENU_VERSION, STALL_MENU_VERSION, directPrompt, directPromptHash, directContext, weeklySchema, weeklyInput, materializeWeek, materializeLegacyWeek, directActionImpacts } from "./direct-menu-planner.mjs";
+import { stallPlanningOrder, stallRequest, materializeStall, ruleOnlyStall, stallQuality, mergeStallWeek } from "./stall-menu-planner.mjs";
+import { scoreMenu } from "./menu-scoring.mjs";
+import { readStallCatalog } from "./stored-stall-catalog.mjs";
+import { isApprovedMenuAction } from "../shared/menu-action-state.mjs";
+import { getPromptConfig, getEffectiveRules } from "./prompt-config.mjs";
+import { renderRules } from "./prompt-builders.mjs";
 
 const clone = (value) => structuredClone(value);
 const digest = (value) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -62,29 +70,43 @@ function planningSettings(settings = {}) {
   return values;
 }
 
-function sourceRules(store) {
+function samePromptConfig(left, right) {
+  const fields = value => value ? { menuSystemText: value.menuSystemText, approvedActionText: value.approvedActionText } : null;
+  return digest(fields(left)) === digest(fields(right));
+}
+function promptConfigCurrent(store, snapshots) {
+  const current = getPromptConfig(store);
+  if (!snapshots.promptConfig) return current.version === 0;
+  return samePromptConfig(current, snapshots.promptConfig);
+}
+
+export function sourceRules(store, configured = true) {
   let stall = "全部档口";
   let sheet = "";
-  return (store.get("meta", "rules") || []).map((rule, index) => {
+  const config = configured ? getPromptConfig(store) : null;
+  const rows = config?.version > 0 ? getEffectiveRules(store) : store.get("meta", "rules") || [];
+  return rows.map((rule, index) => {
     const sourceSheet = `${rule.source?.file || ""}|${rule.source?.sheet || ""}`;
     if (sourceSheet !== sheet) { stall = "未明确档口"; sheet = sourceSheet; }
     if (rule.stall && rule.stall !== "续行") stall = rule.stall;
     const appliesTo = stall.split(/[&＆、,，+＋/／|｜;；]/).map((item) => item.trim()).filter(Boolean)
       .map((item) => item === "铁锅炖" ? "一锅烟火" : ["通用", "通用规则", "所有档口"].includes(item) ? "全部档口" : item);
     return {
-      id: `R-${digest([index, rule]).slice(0, 16)}`,
+      id: rule.id || `R-${digest(rule.source?.row ? [rule.source.file, rule.source.sheet, rule.source.row, rule.text] : [index, rule]).slice(0, 16)}`,
       stall,
       originalStall: rule.stall || "",
       appliesTo,
       text: rule.text || "",
       source: rule.source || null,
+      ...(rule.origin && rule.origin !== "source" ? { origin: rule.origin, ...(rule.originalText ? { originalText: rule.originalText } : {}) } : {}),
+      meal: rule.meal || "待确认",
     };
   });
 }
 
 export function approvedMenuActions(store, { demo = false } = {}) {
   return store.all("actions")
-    .filter((action) => action.feedbackIds?.length && (action.demo === true) === demo && action.status === "approved" && action.enabled === true && action.menuInstruction?.trim())
+    .filter((action) => isApprovedMenuAction(action, { demo }))
     .map((action) => ({
       id: action.id,
       feedbackId: action.feedbackId,
@@ -114,15 +136,31 @@ function dishSnapshot(dish) {
 }
 
 function captureSnapshots(store, settings, demo = false) {
+  const config = getPromptConfig(store);
   return {
+    ...(!demo ? { promptConfig: { version: config.version, menuSystemText: config.menuSystemText, approvedActionText: config.approvedActionText }, sourceRules: sourceRules(store, false) } : {}),
+    stallCatalog: clone(readStallCatalog(store)),
     settings: clone(settings),
-    rules: sourceRules(store),
+    rules: sourceRules(store, !demo),
+    ruleSource: clone(store.get("meta", "menu-rule-source") || null),
+    fixedStaples: clone(store.get("meta", "menu-fixed-staples") || []),
+    fixedDishes: clone(store.get("meta", "menu-fixed-dishes") || []),
     actions: approvedMenuActions(store, { demo }),
     // Preserve store order: the canonical all-stall menu layout uses first-seen
     // stall order, which checkMenu also validates when saving an edited draft.
     dishes: store.all("dishes").map(dishSnapshot),
     prompts: { planner: `${settings.plannerPrompt || ""}\n${plannerContract}`, inspector: `${settings.inspectorPrompt || ""}\n${inspectorContract}` },
   };
+}
+
+function setDirectPrompts(snapshots) {
+  snapshots.prompts.planner = directPrompt(snapshots);
+  snapshots.prompts.inspector = `${snapshots.settings.inspectorPrompt || ""}\n${inspectorContract}\n本次菜单由GPT直接选定，检查实际六周菜单及每周行动落实位置。不得把相对本地随机基线的变化当作行动因果效果。\n# 本地文件规则与当前启用的运营规则\n${renderRules(snapshots.rules)}\n# 已批准行动核验依据\n${JSON.stringify(snapshots.actions.map(({ id, title, targetStall, menuInstruction, revision }) => ({ id, title, targetStall, menuInstruction, revision })))}\n只输出检验员schema，不输出排菜员的menus或actionReviews。` ;
+}
+function sourceFileChanged(run) {
+  if (!run.ruleSourcePath) return false;
+  try { return createHash("sha256").update(readFileSync(run.ruleSourcePath)).digest("hex") !== run.snapshots.ruleSource?.sha256; }
+  catch { return true; }
 }
 
 // Fairly sample real candidates by stall, unit and price, prioritizing explicit
@@ -260,21 +298,27 @@ function workflowSummary(run, plan, inspector, impacts) {
   return {
     runId: run.id,
     mode: run.demo ? "demo" : "ai",
-    source: run.demo ? "真实规则引擎 + 本地模拟排菜员/检验员（不调用 AI）" : "Azure AI 排菜员/检验员 + 本地规则引擎",
+    source: run.demo ? "真实规则引擎 + 本地模拟排菜员/检验员（不调用 AI）" : run.snapshots.planningMode === "per-stall" ? "已入库档口候选 + GPT 逐周逐档选菜 + 独立 GPT 检验 + 本地规则校验" : run.generationMode === "gpt-direct" ? "GPT 逐周直接选菜 + 独立 GPT 检验 + 本地规则校验" : "Azure AI 排菜员/检验员 + 本地规则引擎",
+    generationMode: run.generationMode || "strategy",
+    sourceRuleInfo: { file: run.snapshots.ruleSource?.file || run.snapshots.rules[0]?.source?.file || "", sha256: run.snapshots.ruleSource?.sha256 || "", ruleCount: run.snapshots.rules.length, warnings: run.snapshots.ruleSource?.warnings || [] },
+    catalogInfo: run.snapshots.planningMode === "per-stall" && run.snapshots.stallCatalog ? { file: run.snapshots.stallCatalog.source.file, sha256: run.snapshots.stallCatalog.source.sha256,
+      groups: run.snapshots.stallCatalog.groups.map(group => ({ stall: group.stall, origin: group.origin, candidates: group.candidateIds.length, unresolved: group.unresolved.length })),
+      warnings: run.snapshots.stallCatalog.warnings, stats: run.snapshots.stallCatalog.stats } : null,
     status: plan.validation.errors > 0 || inspector.verdict === "revise" || inspector.findings.some((finding) => finding.severity === "error") ? "blocked" : "needs_review",
     promptVersion: run.snapshots.settings.version, menuFingerprint: menuFingerprint(plan),
     requiresHumanApproval: true, stale: false, staleReasons: [],
     planner: run.planner, inspector, actionImpacts: impacts, inspectedAt: new Date().toISOString(),
+    score: scoreMenu(plan, { actionImpacts: impacts, inspector }),
   };
 }
 
 async function inspectRun({ store, ai, run, plan, baseline }) {
   const { snapshots } = run;
   plan = withPolicyValidation(plan, run.planner.decisions);
-  const impacts = actionImpacts(plan, baseline, run.planner, snapshots.actions, snapshots.dishes);
+  const impacts = run.generationMode === "gpt-direct" ? directActionImpacts(plan, run.planner, snapshots.actions, snapshots.dishes) : actionImpacts(plan, baseline, run.planner, snapshots.actions, snapshots.dishes);
   const menu = actualMenu(plan, snapshots.dishes);
   const input = {
-    sourceRules: snapshots.rules, approvedActions: snapshots.actions,
+    sourceRules: snapshots.rules, approvedActions: snapshots.actions, fixedStaples: snapshots.fixedStaples, fixedDishes: snapshots.fixedDishes,
     operatorNotes: snapshots.settings.operatorNotes || "",
     actualMenu: menu, localValidation: validationSummary(plan.validation),
     actionImpacts: impacts, planner: { summary: run.planner.summary, decisions: run.planner.decisions, unresolved: run.planner.unresolved },
@@ -283,7 +327,7 @@ async function inspectRun({ store, ai, run, plan, baseline }) {
   run.plan = plan;
   run.inspectorInput = input;
   store.put("menuRuns", run.id, run);
-  const response = await ai.respond({ role: "inspector", prompt: snapshots.prompts.inspector, input, schema: z.toJSONSchema(inspectorSchema), maxOutputTokens: 7000 });
+  const response = await ai.respond({ role: "inspector", prompt: snapshots.prompts.inspector, input, schema: z.toJSONSchema(inspectorSchema), maxOutputTokens: 9000 });
   const result = inspectorSchema.parse(response.data);
   const actions = new Set(snapshots.actions.map((action) => action.id));
   const rules = new Set(snapshots.rules.map((rule) => rule.id));
@@ -302,7 +346,16 @@ async function inspectRun({ store, ai, run, plan, baseline }) {
     result.verdict = "revise";
     result.findings.unshift({ severity: "warning", text: `${unmet.length} 项已批准排菜行动尚未全部落实，请核对行动影响记录并调整指令或候选菜。`, actionIds: unmet.slice(0, 30).map((impact) => impact.actionId), ruleIds: [], dishIds: [] });
   }
+  for (const impact of impacts) {
+    const findings = result.findings.filter(finding => finding.actionIds.includes(impact.actionId));
+    if (findings.length && impact.status === "applied") {
+      impact.status = "partial";
+      impact.evidence.push(...findings.map(finding => `检验员：${finding.text}`));
+      result.verdict = "revise";
+    }
+  }
   const inspector = aiResult(response, result);
+  if (run.generationMode === "gpt-direct") assertDirectSnapshot(store, run);
   const workflow = workflowSummary(run, plan, inspector, impacts);
   run.workflow = workflow;
   run.plan = { ...plan, ...(run.demo ? { demo: true } : {}), workflow };
@@ -329,15 +382,300 @@ function failRun(store, run, error) {
   run.stage = "failed";
   run.status = "failed";
   run.error = error instanceof z.ZodError ? "AI 返回的菜单工作流结构无效，请重试或人工处理" : error.message;
+  run.diagnostics = { ...safeDiagnostics(error, run.currentWeek), ...(run.currentStall && run.failedStage === "planning" ? { stall: run.currentStall } : {}) };
   run.completedAt = new Date().toISOString();
   store.put("menuRuns", run.id, run);
-  throw Object.assign(new Error(run.error), { statusCode: error.statusCode || 502, runId: run.id });
+  throw Object.assign(new Error(run.error), { statusCode: error.statusCode || 502, runId: run.id, diagnostics: run.diagnostics });
+}
+
+function safeDiagnostics(error, week) {
+  const detail = error.diagnostics || {};
+  return { code: /^[A-Z0-9_]{1,80}$/.test(detail.code || "") ? detail.code : error instanceof z.ZodError ? "MENU_SCHEMA_INVALID" : "MENU_GENERATION_FAILED",
+    week: Number.isInteger(detail.week) ? detail.week : week,
+    ...Object.fromEntries(["stall", "day", "meal", "slot", "dishIndex"].filter(key =>
+      typeof detail[key] === "number" || typeof detail[key] === "string" && detail[key].length <= 120).map(key => [key, detail[key]])),
+  };
+}
+
+function assertDirectSnapshot(store, run) {
+  const snapshots = run.snapshots;
+  if (snapshots.planningMode === "per-stall" && digest(readStallCatalog(store)) !== digest(snapshots.stallCatalog))
+    throw new Error("生成期间数据库候选菜库已变化，请重新生成");
+  if (digest(approvedMenuActions(store)) !== digest(snapshots.actions) || digest(sourceRules(store, !snapshots.promptConfig)) !== digest(snapshots.sourceRules || snapshots.rules) ||
+      digest(store.get("meta", "menu-rule-source") || null) !== digest(snapshots.ruleSource) ||
+      digest(store.get("meta", "menu-fixed-staples") || []) !== digest(snapshots.fixedStaples) ||
+      digest(store.get("meta", "menu-fixed-dishes") || []) !== digest(snapshots.fixedDishes) ||
+      digest(store.all("dishes").map(dishSnapshot)) !== digest(snapshots.dishes) ||
+      digest(menuSettings(store.get("settings", "current") || snapshots.settings)) !== digest(menuSettings(snapshots.settings)) ||
+      directPromptHash(snapshots) !== run.promptHash) throw new Error("生成期间菜库、源规则、已批准事项或内部配置已变化，请重新生成");
+  if (sourceFileChanged(run))
+    throw new Error("生成期间本地排菜规则文件已变化，请重新生成");
 }
 
 /** All-stall, six-week draft. Model suggestions never constitute approval. */
-export async function runMenuWorkflow({ store, ai, input, settings }) {
+export async function runMenuWorkflow({ store, ai, input, settings, ruleSourcePath, onProgress }) {
   if (input.demo === true) throw new Error("模拟排菜必须使用显式的模拟排菜测试入口，不会调用真实 AI");
-  return generateWorkflow({ store, ai, input, settings, demo: false });
+  const options = batchOptionsSchema.parse({ ...input, scope: "all" });
+  const snapshots = captureSnapshots(store, settings, false);
+  if (snapshots.stallCatalog) snapshots.planningMode = "per-stall";
+  if (!snapshots.dishes.length) throw new Error("菜库为空，无法编排六周菜单");
+  if (snapshots.actions.length > 200) throw new Error("当前启用排菜行动超过200项，请合并后生成");
+  const context = directContext(snapshots, options);
+  if (!context.candidates.length) throw new Error("没有启用的候选菜品");
+  setDirectPrompts(snapshots);
+  const run = { id: `MR-${randomUUID()}`, demo: false, generationMode: "gpt-direct", plannerVersion: snapshots.planningMode === "per-stall" ? STALL_MENU_VERSION : DIRECT_MENU_VERSION,
+    promptHash: directPromptHash(snapshots), ruleSourcePath, createdAt: new Date().toISOString(), stage: "planning", status: "running", input: options, snapshots, plannerBatches: [], plannerAttempts: [], stallBatches: [] };
+  store.put("menuRuns", run.id, run);
+  return continueDirectRun({ store, ai, run, context, weeks: [], onProgress });
+}
+
+async function planStallWeek({ store, ai, run, context, week, weeks }) {
+  const results = [];
+  for (const item of stallPlanningOrder(context)) {
+    assertDirectSnapshot(store, run);
+    run.currentStall = item.stall;
+    const request = stallRequest(run.snapshots, run.input, context, item, week, weeks.map(w => w.compact), results);
+    const saved = run.stallBatches.find(batch => batch.week === week && batch.stall === item.stall);
+    if (saved) { results.push(materializeStall(saved.result, request, run.input, week, item)); continue; }
+    const fixed = ruleOnlyStall(request, run.input);
+    let best;
+    let correction;
+    for (let attempt = 1; attempt <= (fixed ? 1 : 3); attempt++) {
+      assertDirectSnapshot(store, run);
+      const record = { week, stall: item.stall, attempt, status: "running", createdAt: new Date().toISOString() };
+      if (!fixed) run.plannerAttempts.push(record);
+      store.put("menuRuns", run.id, run);
+      let response;
+      try {
+        const input = { ...request.input, ...(correction ? { qualityCorrection: correction } : {}) };
+        if (JSON.stringify(input).length > 1200000) throw new Error("档口输入超过安全长度，未截断候选或前序菜单");
+        response = fixed ? { data: fixed, model: "source-rules-no-ai", usage: {} }
+          : await ai.respond({ role: "planner", prompt: directPrompt(request.snapshots), input, schema: z.toJSONSchema(request.schema), maxOutputTokens: 6500 });
+      } catch (error) {
+        record.status = "failed"; record.diagnostics = { ...safeDiagnostics(error, week), stall: item.stall };
+        record.completedAt = new Date().toISOString(); store.put("menuRuns", run.id, run); throw error;
+      }
+      Object.assign(record, aiResult(response, { data: response.data }), { status: "received", completedAt: new Date().toISOString() });
+      store.put("menuRuns", run.id, run);
+      let result;
+      try { result = materializeStall(response.data, request, run.input, week, item); }
+      catch (error) {
+        record.status = "invalid"; record.diagnostics = safeDiagnostics(error, week);
+        store.put("menuRuns", run.id, run);
+        if (attempt === 3) { if (best) break; throw error; }
+        correction = { diagnostics: record.diagnostics, previousOutput: response.data, instruction: "修正当前档口结构与引用，返回完整本周对象" };
+        continue;
+      }
+      const quality = fixed ? { count: 0, issues: [] } : stallQuality(result, request, run.input, week, weeks);
+      record.status = quality.count ? "quality_review" : "accepted"; record.quality = quality;
+      store.put("menuRuns", run.id, run);
+      if (!best || quality.count < best.quality.count) best = { result, response, quality, attempt };
+      if (!quality.count || attempt === 3 || fixed) break;
+      correction = { target: 80, previousOutput: best.response.data, issues: best.quality.issues, instruction: "只优化当前档口本周可修复冲突，不能改前序菜单、伪造标签或跨档口选菜" };
+    }
+    assertDirectSnapshot(store, run);
+    if (!best) throw new Error(`第${week}周${item.stall}没有可用菜单结果`);
+    results.push(best.result);
+    run.stallBatches.push({ week, stall: item.stall, result: best.response.data, quality: best.quality, attempt: best.attempt,
+      ...aiResult(best.response, { summary: best.result.summary }), format: STALL_MENU_VERSION, sourceRunId: run.id, mode: fixed ? "source-rule" : "ai" });
+    store.put("menuRuns", run.id, run);
+  }
+  const merged = mergeStallWeek(week, results, context, run.snapshots.actions, run.input);
+  const verified = materializeWeek(merged.raw, run.snapshots, run.input, context, week);
+  return { ...verified, raw: merged.raw };
+}
+
+function sumPlannerUsage(records) {
+  return records.reduce((sum, record) => ({
+    input_tokens: sum.input_tokens + (record.usage?.input_tokens || 0),
+    output_tokens: sum.output_tokens + (record.usage?.output_tokens || 0),
+  }), { input_tokens: 0, output_tokens: 0 });
+}
+
+function partialMenu(run, context, weeks) {
+  return { ...clone(run.input), scope: "all", stall: "全部档口", stalls: [...context.stalls],
+    generationMode: "gpt-direct", generationRunId: run.id, partial: true, completedWeeks: weeks.length, createdAt: run.createdAt,
+    entries: clone(context.stalls.flatMap(stall => weeks.flatMap(week => week.entries.filter(entry => entry.stall === stall)))),
+    fixedStaples: clone(run.snapshots.fixedStaples), fixedDishes: clone(run.snapshots.fixedDishes),
+  };
+}
+
+async function continueDirectRun({ store, ai, run, context, weeks, onProgress }) {
+  const { snapshots, input: options } = run;
+  const progress = async type => {
+    if (!onProgress) return;
+    // Only materialized, checkpointed weeks are visible. No schema/raw output,
+    // internal prompts, ungenerated slots or premature inspection claims.
+    await onProgress({ type, runId: run.id, totalWeeks: 6, completedWeeks: weeks.length,
+      currentWeek: type === "started" ? Math.min(6, weeks.length + 1) : run.currentWeek || weeks.length,
+      ...(weeks.length ? { plan: partialMenu(run, context, weeks) } : {}),
+    });
+  };
+  try {
+    await progress("started");
+    for (let week = weeks.length + 1; week <= 6; week++) {
+      assertDirectSnapshot(store, run);
+      run.currentWeek = week;
+      if (snapshots.planningMode === "per-stall") {
+        const result = await planStallWeek({ store, ai, run, context, week, weeks });
+        weeks.push(result);
+        run.plannerBatches.push({ week, format: DIRECT_MENU_VERSION, summary: result.summary, warnings: result.warnings,
+          model: run.stallBatches.find(batch => batch.week === week && batch.mode === "ai")?.model || "source-rules-no-ai", usage: sumPlannerUsage(run.stallBatches.filter(batch => batch.week === week)), result: result.raw });
+        store.put("menuRuns", run.id, run);
+        await progress("week");
+        continue;
+      }
+      const batchInput = weeklyInput(snapshots, options, context, week, weeks.map(w => w.compact));
+      if (JSON.stringify(batchInput).length > 1200000) throw new Error("菜单输入过大，未截断菜库或生成不完整结果");
+      let result;
+      let response;
+      let correction;
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        assertDirectSnapshot(store, run);
+        const record = { week, attempt, status: "running", createdAt: new Date().toISOString() };
+        run.plannerAttempts.push(record);
+        store.put("menuRuns", run.id, run);
+        try {
+          response = await ai.respond({ role: "planner", prompt: snapshots.prompts.planner,
+            input: { ...batchInput, ...(correction ? { correction } : {}) },
+            schema: z.toJSONSchema(weeklySchema(context, options)), maxOutputTokens: 14000 });
+        } catch (error) {
+          // A timeout/transport failure may still be billable upstream. Never
+          // automatically retry it; explicit resume is a new user decision.
+          record.status = "failed";
+          record.diagnostics = safeDiagnostics(error, week);
+          record.completedAt = new Date().toISOString();
+          store.put("menuRuns", run.id, run);
+          throw error;
+        }
+        Object.assign(record, aiResult(response, { data: response.data }), { status: "received", completedAt: new Date().toISOString() });
+        // Persist even invalid model output before any materialization. This is
+        // server-only evidence, never part of the operational API projection.
+        store.put("menuRuns", run.id, run);
+        assertDirectSnapshot(store, run);
+        try {
+          result = materializeWeek(response.data, snapshots, options, context, week);
+          record.status = "accepted";
+          store.put("menuRuns", run.id, run);
+          break;
+        } catch (error) {
+          record.status = "invalid";
+          record.diagnostics = safeDiagnostics(error, week);
+          store.put("menuRuns", run.id, run);
+          if (attempt === 3) throw error;
+          correction = { attempt: attempt + 1, diagnostics: record.diagnostics, previousOutput: response.data,
+            instruction: "只修正本周不合法的输出并返回完整本周对象；尽量保持其他已合法槽位。之前成功周次不允许改动。仍须满足同一档口局部索引、人工菜单、固定出品及行动范围约束。" };
+        }
+      }
+      weeks.push(result);
+      run.plannerBatches.push({ week, format: DIRECT_MENU_VERSION, ...aiResult(response, { summary: result.summary, warnings: result.warnings }), result: response.data });
+      store.put("menuRuns", run.id, run);
+      // Flush this week's actual dishes before requesting the next week.
+      await progress("week");
+    }
+    const entries = context.stalls.flatMap(stall => weeks.flatMap(w => w.entries.filter(e => e.stall === stall)));
+    const previous = store.all("plans").filter(p => p.scope === "all" && !p.demo).at(-1);
+    const plan = checkMenu(snapshots.dishes, { ...options, generationMode: "gpt-direct", stalls: context.stalls, entries }, previous, { fixedDishes: snapshots.fixedDishes });
+    plan.generationMode = "gpt-direct";
+    plan.fixedStaples = snapshots.fixedStaples;
+    run.planner = { summary: `GPT已逐周直接编排六周菜单。${weeks.map((w, i) => `第${i + 1}周：${w.summary}`).join("\n")}`,
+      model: run.plannerBatches[0]?.model || "", decisions: [], actionReviews: weeks.flatMap(w => w.reviews),
+      unresolved: weeks.flatMap((w, index) => w.warnings.map(reason => ({ actionId: "", reason: `第${index + 1}周：${reason}` }))),
+      // Current-run usage includes invalid outputs that required correction, but
+      // never charges reused historical weeks a second time. Missing upstream
+      // usage (for example a transport timeout) is unknown, not an estimate.
+      usage: sumPlannerUsage(run.plannerAttempts),
+      acceptedOutputUsage: sumPlannerUsage(snapshots.planningMode === "per-stall" ? run.stallBatches : run.plannerBatches),
+      reusedUsage: sumPlannerUsage((snapshots.planningMode === "per-stall" ? run.stallBatches : run.plannerBatches).filter(batch => batch.sourceRunId && batch.sourceRunId !== run.id)),
+    };
+    await progress("inspecting");
+    return await inspectRun({ store, ai, run, plan, baseline: null });
+  } catch (error) { return failRun(store, run, error); }
+}
+
+const LEGACY_TEMPLATE_SHA256 = "68706a10c753eb855f383701b36ed9120828a18b6b7f099f989c62972d764f07";
+const sha256Text = value => createHash("sha256").update(value).digest("hex");
+function resumeContext(store, prior, settings, ruleSourcePath) {
+  if (!prior || prior.demo || prior.generationMode !== "gpt-direct" || !["failed", "cancelled"].includes(prior.status))
+    throw new Error("仅可继续已失败或停止的真实排菜；运行中请等待，已完成请查看结果");
+  const snapshots = captureSnapshots(store, settings, false);
+  if (!prior.snapshots?.promptConfig && getPromptConfig(store).version === 0) delete snapshots.promptConfig;
+  if (!samePromptConfig(snapshots.promptConfig, prior.snapshots?.promptConfig)) throw new Error("Prompt配置已变化，不能复用旧周次，请重新生成");
+  if (prior.snapshots?.planningMode === "per-stall") {
+    snapshots.planningMode = "per-stall";
+    if (digest(snapshots.stallCatalog) !== digest(prior.snapshots.stallCatalog)) throw new Error("数据库候选菜库已变化，不能混用原档口结果");
+  }
+  for (const field of ["rules", "ruleSource", "fixedStaples", "fixedDishes", "actions", "dishes"])
+    if (digest(snapshots[field]) !== digest(prior.snapshots?.[field])) throw new Error("规则、菜库或已批准事项已变化，不能复用旧周次，请重新生成");
+  if (digest(menuSettings(settings)) !== digest(menuSettings(prior.snapshots.settings)) ||
+      digest(menuSettings(store.get("settings", "current") || settings)) !== digest(menuSettings(settings)))
+    throw new Error("内部配置已变化，不能复用旧周次，请重新生成");
+  if (sourceFileChanged(prior) || ruleSourcePath && sourceFileChanged({ ...prior, ruleSourcePath }))
+    throw new Error("本地源规则文件已变化或不可读取，不能继续旧菜单");
+  const oldPrompt = prior.snapshots.prompts?.planner || "";
+  if (sha256Text(oldPrompt) !== prior.promptHash) throw new Error("旧排菜指令快照不完整，不能继续");
+  if (prior.plannerVersion === "gpt-direct-v1") {
+    const template = oldPrompt.split("\n# 本地文件规则（餐饮业务约束，保留来源）")[0].replace(/\r\n/g, "\n").trimEnd() + "\n";
+    if (sha256Text(template) !== LEGACY_TEMPLATE_SHA256) throw new Error("旧排菜模板不兼容，需重新生成");
+  } else if (![DIRECT_MENU_VERSION, STALL_MENU_VERSION].includes(prior.plannerVersion) || directPromptHash(snapshots) !== prior.promptHash)
+    throw new Error("排菜指令已变化，不能复用旧周次，请重新生成");
+  const options = batchOptionsSchema.parse(prior.input);
+  const context = directContext(snapshots, options);
+  const batches = prior.plannerBatches || [];
+  if (batches.length > 6 || batches.some((batch, i) => batch.week !== i + 1)) throw new Error("已保存周次不是连续完整记录，不能继续");
+  if (snapshots.planningMode === "per-stall") {
+    const order = stallPlanningOrder(context);
+    const saved = prior.stallBatches || [];
+    if (saved.length < batches.length * order.length || saved.length > Math.min(6, batches.length + 1) * order.length ||
+        saved.some((batch, index) => batch.week !== Math.floor(index / order.length) + 1 || batch.stall !== order[index % order.length].stall || batch.format !== STALL_MENU_VERSION))
+      throw new Error("已保存档口不是连续完整记录，不能继续");
+  }
+  const weeks = batches.map(batch => {
+    const format = batch.format || prior.plannerVersion;
+    if (![DIRECT_MENU_VERSION, "gpt-direct-v1"].includes(format)) throw new Error("旧菜单格式不兼容，需重新生成");
+    return (format === "gpt-direct-v1" ? materializeLegacyWeek : materializeWeek)(batch.result, snapshots, options, context, batch.week);
+  });
+  return { snapshots, options, context, weeks };
+}
+
+export async function resumeMenuWorkflow({ store, ai, runId, settings, ruleSourcePath, onProgress }) {
+  const prior = store.get("menuRuns", runId);
+  const { snapshots, options, context, weeks } = resumeContext(store, prior, settings, ruleSourcePath);
+  if (store.all("menuRuns").some(run => run.parentRunId === runId && run.status !== "failed" && run.status !== "cancelled"))
+    throw new Error("该记录已经继续生成，请查看最新运行记录，避免重复调用");
+  setDirectPrompts(snapshots);
+  const run = { id: `MR-${randomUUID()}`, parentRunId: prior.id, demo: false, generationMode: "gpt-direct", plannerVersion: snapshots.planningMode === "per-stall" ? STALL_MENU_VERSION : DIRECT_MENU_VERSION,
+    promptHash: directPromptHash(snapshots), ruleSourcePath: ruleSourcePath || prior.ruleSourcePath, createdAt: new Date().toISOString(),
+    stage: weeks.length === 6 ? "inspecting" : "planning", status: "running", input: options, snapshots,
+    resumedWeeks: weeks.length, plannerAttempts: [], stallBatches: clone(prior.stallBatches || []), plannerBatches: clone(prior.plannerBatches).map(batch => ({ ...batch, format: batch.format || prior.plannerVersion, sourceRunId: batch.sourceRunId || prior.id })) };
+  store.put("menuRuns", run.id, run);
+  return continueDirectRun({ store, ai, run, context, weeks, onProgress });
+}
+
+export function menuRecoveryRecords(store, settings) {
+  const runs = store.all("menuRuns");
+  return runs.filter(run => !run.demo && run.generationMode === "gpt-direct").slice(-30).reverse().map(run => {
+    let resumable = false;
+    let reason = "";
+    if (["failed", "cancelled"].includes(run.status)) {
+      try {
+        resumeContext(store, run, settings);
+        if (runs.some(child => child.parentRunId === run.id && !["failed", "cancelled"].includes(child.status)))
+          reason = "已创建后续运行，请查看最新记录";
+        else resumable = true;
+      } catch (error) { reason = error.message; }
+    }
+    return { id: run.id, createdAt: run.createdAt, status: run.status, stage: run.stage, currentWeek: run.currentWeek,
+      completedWeeks: run.plannerBatches?.length || 0, resumedWeeks: run.resumedWeeks || 0, parentRunId: run.parentRunId, resumable,
+      canUseSavedResult: run.stage === "completed" && Boolean(run.plan && run.workflow),
+      ...(run.error || reason ? { error: { ...run.diagnostics, message: reason || run.error } } : {}) };
+  });
+}
+
+export function completedMenuResult(store, runId, settings) {
+  const run = store.get("menuRuns", runId);
+  if (!run || run.demo || run.stage !== "completed" || !run.plan || !run.workflow) throw new Error("该运行尚无完整菜单结果");
+  return attachMenuWorkflow(store, run.plan, run.workflow, settings);
 }
 
 async function generateWorkflow({ store, ai, input, settings, demo }) {
@@ -378,10 +716,21 @@ export function attachMenuWorkflow(store, checkedPlan, claimedWorkflow, settings
   if (!run?.workflow || run.stage !== "completed") throw new Error("菜单检验记录不存在或尚未完成");
   if (claimedWorkflow.mode && claimedWorkflow.mode !== (run.demo ? "demo" : "ai")) throw new Error("模拟和正式菜单的检验模式不可混用");
   const workflow = clone(run.workflow);
+  if (run.snapshots.planningMode === "per-stall" && run.snapshots.stallCatalog?.storageMode === "database")
+    workflow.source = "已入库档口候选 + GPT 逐周逐档选菜 + 独立 GPT 检验 + 本地规则校验";
   const reasons = [];
-  if (menuFingerprint(checkedPlan) !== workflow.menuFingerprint) reasons.push("菜单菜品或槽位已修改，需重新检验");
+  const menuChanged = menuFingerprint(checkedPlan) !== workflow.menuFingerprint;
+  if (menuChanged) reasons.push("菜单菜品或槽位已修改，需重新检验");
+  // Derived from trusted evidence, never from a client flag. It survives a
+  // subsequent local check, and clears only after a new inspection is stored.
+  workflow.repairPendingInspection = menuChanged;
   if (digest(approvedMenuActions(store, { demo: run.demo === true })) !== digest(run.snapshots.actions)) reasons.push("已批准行动或运营调整已变更，需重新生成");
-  if (digest(sourceRules(store)) !== digest(run.snapshots.rules)) reasons.push("源排菜规则已变更，需重新生成");
+  if (digest(sourceRules(store, !run.demo)) !== digest(run.snapshots.rules)) reasons.push("源排菜规则已变更，需重新生成");
+  if (!run.demo && !promptConfigCurrent(store, run.snapshots)) reasons.push("排菜或 Action Prompt 已变更，将用于下一次生成；此菜单需重新生成");
+  if (run.generationMode === "gpt-direct" && (digest(store.get("meta", "menu-rule-source") || null) !== digest(run.snapshots.ruleSource) || directPromptHash(run.snapshots) !== run.promptHash)) reasons.push("本地规则文件或排菜指令版本已变更，需重新生成");
+  if (run.generationMode === "gpt-direct" && sourceFileChanged(run)) reasons.push("本地排菜规则文件已修改或不可读取，需同步并重新生成");
+  if (run.snapshots.planningMode === "per-stall" && digest(readStallCatalog(store)) !== digest(run.snapshots.stallCatalog))
+    reasons.push("数据库菜品或档口候选已变化，需重新生成");
   const dishes = store.all("dishes").map(dishSnapshot);
   if (digest(dishes) !== digest(run.snapshots.dishes)) reasons.push("菜库或核验标签已变更，需重新检验");
   if (!run.demo && settings && digest(menuSettings(settings)) !== digest(menuSettings(run.snapshots.settings))) reasons.push("内部排菜配置已变更，需重新检验；排菜要求变更时需重新生成");
@@ -390,7 +739,19 @@ export function attachMenuWorkflow(store, checkedPlan, claimedWorkflow, settings
     workflow.status = "stale";
     workflow.staleReasons = reasons;
   }
-  return { ...withPolicyValidation(checkedPlan, run.planner.decisions), ...(run.demo ? { demo: true } : { demo: false }), workflow };
+  const restored = { ...checkedPlan, demo: run.demo === true, generationMode: run.generationMode || "strategy",
+    fixedStaples: run.snapshots.fixedStaples || [], fixedDishes: run.snapshots.fixedDishes || [] };
+  // Keep the model's original choices; never silently fix an inspected menu.
+  // The initial check may have used a missing or forged client generationMode.
+  // Run every rule again after restoring the server-owned mode and sources;
+  // otherwise manual-upload requirements could disappear with the mode flag.
+  // Only the comparison metric from the prior server check is retained.
+  const validation = validateMenu(restored, dishes);
+  restored.validation = { ...validation, changeRate: checkedPlan.validation?.changeRate ?? validation.changeRate };
+  const validated = withPolicyValidation(restored, run.planner.decisions);
+  if (!workflow.stale && validated.validation.errors > 0) workflow.status = "blocked";
+  workflow.score = scoreMenu(validated, { actionImpacts: workflow.actionImpacts, inspector: workflow.inspector, stale: workflow.stale });
+  return { ...validated, workflow };
 }
 
 /** Recheck a manually edited draft without paying for another planning call. */
@@ -402,21 +763,29 @@ export async function reinspectMenuWorkflow({ store, ai, input, settings }) {
     throw new Error("模拟和正式菜单的检验模式不可混用；模拟检验需显式 demo: true");
   if (demo) ai = createDemoAi();
   const snapshots = captureSnapshots(store, settings, demo);
+  if (!prior.snapshots.promptConfig && getPromptConfig(store).version === 0) delete snapshots.promptConfig;
+  if (!demo && !samePromptConfig(snapshots.promptConfig, prior.snapshots.promptConfig)) throw new Error("排菜或 Action Prompt已修改，请重新生成后检验");
+  if (prior.snapshots.planningMode === "per-stall") {
+    snapshots.planningMode = "per-stall";
+    if (digest(snapshots.stallCatalog) !== digest(prior.snapshots.stallCatalog)) throw new Error("数据库候选菜库已变更，请重新生成");
+  }
+  if (prior.generationMode === "gpt-direct") setDirectPrompts(snapshots);
   if (digest(snapshots.actions) !== digest(prior.snapshots.actions) || digest(snapshots.rules) !== digest(prior.snapshots.rules) ||
     (!demo && digest(planningSettings(settings)) !== digest(planningSettings(prior.snapshots.settings))))
     throw new Error("行动、源规则或内部排菜配置已调整，请重新生成六周菜单后检验");
+  if (prior.generationMode === "gpt-direct" && (directPromptHash(snapshots) !== prior.promptHash || digest(snapshots.ruleSource) !== digest(prior.snapshots.ruleSource))) throw new Error("本地规则文件或排菜指令已变化，请重新生成");
   const options = batchOptionsSchema.parse(input);
   if (digest(options) !== digest(prior.input)) throw new Error("六周日期、餐次或排菜配置已变更，请重新生成菜单");
   const previous = store.all("plans").filter((item) => item.scope === "all" && (item.demo === true || item.workflow?.mode === "demo") === demo).at(-1);
-  const plan = checkMenu(snapshots.dishes, input, previous);
+  const plan = checkMenu(snapshots.dishes, { ...input, generationMode: prior.generationMode }, previous, { fixedDishes: snapshots.fixedDishes });
   const run = {
     id: `MR-${randomUUID()}`, parentRunId: prior.id, createdAt: new Date().toISOString(),
-    demo, stage: "inspecting", status: "running", input: options, snapshots, planner: clone(prior.planner),
+    demo, generationMode: prior.generationMode, promptHash: prior.promptHash, ruleSourcePath: prior.ruleSourcePath, stage: "inspecting", status: "running", input: options, snapshots, planner: clone(prior.planner),
     plannerRunId: prior.plannerRunId || prior.id,
   };
   store.put("menuRuns", run.id, run);
   try {
-    const baseline = generateMenu(snapshots.dishes, options, [], run.planner.decisions.filter((decision) => !decision.actionIds.length));
+    const baseline = prior.generationMode === "gpt-direct" ? null : generateMenu(snapshots.dishes, options, [], run.planner.decisions.filter((decision) => !decision.actionIds.length));
     return await inspectRun({ store, ai, run, plan, baseline });
   } catch (error) {
     return failRun(store, run, error);

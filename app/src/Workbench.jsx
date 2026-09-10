@@ -1,4 +1,4 @@
-import { lazy, startTransition, Suspense, useEffect, useState } from "react";
+import { lazy, startTransition, Suspense, useEffect, useRef, useState } from "react";
 import {
   MessageSquare,
   CalendarDays,
@@ -11,15 +11,18 @@ import {
   LoaderCircle,
   RefreshCw,
   ListChecks,
+  SlidersHorizontal,
 } from "lucide-react";
 import Feedback from "./Feedback";
 import Catalog from "./Catalog";
 import Menus from "./Menus";
 import { diningApi } from "./api/dining";
+import { viewIds, viewFromHash, writeViewRoute } from "./view-route";
 import "./workbench.css";
 
 const Analytics = lazy(() => import("./Analytics"));
 const Actions = lazy(() => import("./Actions"));
+const PromptSettings = lazy(() => import("./PromptSettings"));
 const navigation = [
   { id: "feedback", name: "反馈中心", icon: MessageSquare },
   { id: "actions", name: "Action 事项", icon: ListChecks },
@@ -29,23 +32,41 @@ const navigation = [
 ];
 export default function Workbench() {
   const [data, setData] = useState(null);
-  const [view, setView] = useState("feedback");
-  const [visited, setVisited] = useState(["feedback"]);
+  const [view, setView] = useState(() => viewFromHash(window.location.hash));
+  const [visited, setVisited] = useState(() => [view]);
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState(null);
   const [error, setError] = useState("");
+  const reloadSequence = useRef(0);
+  useEffect(() => {
+    const syncRoute = () => {
+      const id = viewFromHash(window.location.hash);
+      writeViewRoute(window, id, { replace: true });
+      setView(id);
+      setVisited(current => current.includes(id) ? current : [...current, id]);
+    };
+    syncRoute();
+    window.addEventListener("popstate", syncRoute);
+    window.addEventListener("hashchange", syncRoute);
+    return () => {
+      window.removeEventListener("popstate", syncRoute);
+      window.removeEventListener("hashchange", syncRoute);
+    };
+  }, []);
   useEffect(() => {
     if (!toast || toast.error) return;
     const timer = setTimeout(() => setToast(null), 5000);
     return () => clearTimeout(timer);
   }, [toast]);
   async function reload() {
+    const sequence = ++reloadSequence.current;
     try {
       const next = await diningApi.workspace.load();
+      if (sequence !== reloadSequence.current) return;
       startTransition(() => setData(next));
       setError("");
     } catch (failure) {
-      setError(failure.message);
+      if (sequence === reloadSequence.current) setError(failure.message);
     }
   }
   useEffect(() => {
@@ -61,9 +82,11 @@ export default function Workbench() {
       ignore = true;
     };
   }, []);
-  async function run(action) {
-    if (busy) return;
-    setBusy(true);
+  async function run(action, { background = false } = {}) {
+    // Long-running Action generation has its own page-local lock. Other pages
+    // remain usable while it runs; completion still refreshes shared data.
+    if (!background && busy) return;
+    if (!background) setBusy(true);
     try {
       const message = await action();
       await reload();
@@ -71,7 +94,7 @@ export default function Workbench() {
     } catch (failure) {
       setToast({ text: failure.message, error: true });
     } finally {
-      setBusy(false);
+      if (!background) setBusy(false);
     }
   }
   const views = {
@@ -80,8 +103,11 @@ export default function Workbench() {
     catalog: Catalog,
     analytics: Analytics,
     actions: Actions,
+    prompts: PromptSettings,
   };
   const selectView = (id) => {
+    if (!viewIds.includes(id)) return;
+    writeViewRoute(window, id);
     setView(id);
     setVisited((current) =>
       current.includes(id) ? current : [...current, id],
@@ -122,12 +148,18 @@ export default function Workbench() {
           ))}
         </nav>
         <div className="sidebar-bottom">
-          <div className="small-label">MATERIAL LIBRARY</div>
-          <strong>{data?.report.workbooks || "16"} 份工作簿</strong>
-          <p>{data?.report.sheets || "69"} 张工作表 · 本地资料</p>
-          <div className="local-status">
-            <span />
-            本地工作空间 <Database size={14} />
+          <button className={`sidebar-prompt-link ${view === "prompts" ? "active" : ""}`} onClick={() => selectView("prompts")} aria-current={view === "prompts" ? "page" : undefined}>
+            <SlidersHorizontal size={18} />
+            <span>Prompt 与规则</span>
+          </button>
+          <div className="sidebar-library">
+            <div className="small-label">MATERIAL LIBRARY</div>
+            <strong>{data?.report.workbooks || "16"} 份工作簿</strong>
+            <p>{data?.report.sheets || "69"} 张工作表 · 本地资料</p>
+            <div className="local-status">
+              <span />
+              本地工作空间 <Database size={14} />
+            </div>
           </div>
         </div>
       </aside>
@@ -136,7 +168,7 @@ export default function Workbench() {
           <div>
             <span>BJW</span>
             <i>/</i>
-            {navigation.find((item) => item.id === view).name}
+            {view === "prompts" ? "Prompt 与规则" : navigation.find((item) => item.id === view).name}
           </div>
           <div className="topbar-right">
             <span>

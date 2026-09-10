@@ -78,6 +78,8 @@ test("catalog tags, six-week generation, substitution, persistence and navigatio
     .getByRole("navigation")
     .getByRole("button", { name: /六周菜单/ })
     .click();
+  await page.getByRole("checkbox", { name: "启用 AI 排菜员与检验员", exact: true }).uncheck();
+  await page.getByLabel("起始周一", { exact: true }).fill("2026-09-07");
   await expect(page.getByLabel("排菜档口")).toHaveCount(0);
   const library = await (await page.request.get("/api/data")).json();
   const expectedStalls = [...new Set(library.dishes.map((dish) => dish.stall))];

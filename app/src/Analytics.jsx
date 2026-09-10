@@ -306,7 +306,7 @@ export default function Analytics({ data, run, busy }) {
                       value={unit}
                       onChange={(event) => setUnit(event.target.value)}
                     >
-                      {["份", "个", "斤", "100g"].map((value) => (
+                      {["份", "个", "斤", "100g", "位"].map((value) => (
                         <option key={value}>{value}</option>
                       ))}
                     </select>

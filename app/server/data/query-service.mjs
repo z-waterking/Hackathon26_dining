@@ -2,12 +2,13 @@ import { publicData, publicMenuRun } from "../public-data.mjs";
 import { getActionSummary } from "../action-summary.mjs";
 import { feedbackInsights, monthlySummary } from "../feedback-ai.mjs";
 import { convertedBatchRows } from "../bootstrap.mjs";
-import { attachMenuWorkflow } from "../menu-workflow.mjs";
+import { attachMenuWorkflow, menuRecoveryRecords, completedMenuResult } from "../menu-workflow.mjs";
 import { getSettings } from "../settings.mjs";
 import { validateMenu } from "../menus.mjs";
 import { aggregateTransactions, demoTransactions } from "../domain.mjs";
 import { existsSync } from "node:fs";
 import { resolve, relative, isAbsolute, basename } from "node:path";
+import { promptAdminView } from "../prompt-admin.mjs";
 
 // Public read models live here, independent of Fastify handlers. Both the
 // workspace snapshot and resource endpoints share the same projections.
@@ -26,7 +27,10 @@ export function createQueryService(repository, { ai, root } = {}) {
     materials: () => publicData(repository.get("meta", "inventory")),
     audit: () => publicData(repository.all("audit").slice(-100).reverse()),
     aiStatus: () => publicData(ai.status()),
+    promptConfig: () => promptAdminView(repository),
     menuRun: (id) => publicMenuRun(required("menuRuns", id)),
+    menuRuns: () => publicData(menuRecoveryRecords(repository, getSettings(repository))),
+    menuRunResult: (id) => publicData(completedMenuResult(repository, id, getSettings(repository))),
     actionSummary: (scope) => publicData(getActionSummary(repository, scope)),
     insights: (scope) => publicData(feedbackInsights(repository, scope)),
     monthlySummary: (month) => publicData(monthlySummary(repository, month)),
